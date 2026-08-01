@@ -178,17 +178,23 @@ export function subscribe(callback) {
 // --- Sending ---------------------------------------------------------------
 
 /**
- * POSTs a message to a webhook. Returns a plain result — never throws — with a
- * user-facing `message` on failure that carries NO technical jargon (no
- * "CORS", "payload", "endpoint"). Discord answers a good send with 204.
+ * POSTs an arbitrary Discord webhook JSON body (`{ content }`, `{ embeds }`,
+ * or both). Returns a plain result — never throws — with a user-facing
+ * `message` on failure that carries NO technical jargon (no "CORS",
+ * "payload", "endpoint"). Discord answers a good send with 204.
+ *
+ * Generic on purpose: this is the one place that talks to `fetch`, so a
+ * future message shape (e.g. discordMessage.js's noted per-type-embed mode)
+ * is just a different `payload` object handed in here — nothing about
+ * sending itself has to change.
  */
-export async function sendMessage(url, content) {
+export async function sendWebhookPayload(url, payload) {
   let res;
   try {
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(payload),
     });
   } catch {
     // Network error / blocked request — the user doesn't need to know which.
@@ -202,6 +208,11 @@ export async function sendMessage(url, content) {
   }
   // 401/403/404/... — almost always a wrong or deleted webhook.
   return { ok: false, message: "No pudimos enviar el mensaje. Revisá que la URL sea correcta y volvé a intentar." };
+}
+
+/** Convenience wrapper for a plain-text send (used by the "Probar" test message). */
+export function sendMessage(url, content) {
+  return sendWebhookPayload(url, { content });
 }
 
 const TEST_MESSAGE = "✅ ¡Tu dice roller está conectado! Las tiradas van a aparecer acá.";

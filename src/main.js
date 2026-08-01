@@ -13,12 +13,12 @@ import { animateTransform, updateTweens, cancelTween, easeOutCubic } from "./ani
 import { setupInteraction } from "./interaction.js";
 import { getSelection, isSelected, selectDie, deselectDie, addHeldDie, removeHeldDie, clearHeldDice } from "./state/selection.js";
 import { readRecordValue } from "./dice/dieValue.js";
-import { addRoll, formatDice, formatValueLines } from "./state/rollLog.js";
-import { ROLL_LOG_CONFIG } from "./state/rollLogConfig.js";
+import { addRoll } from "./state/rollLog.js";
 import { createThrowBatcher } from "./state/throwBatches.js";
 import { createRollLogPanel } from "./ui/rollLogPanel.js";
 import { createDiscordPanel } from "./ui/discordPanel.js";
-import { isConnected, getWebhookUrl, sendMessage } from "./state/discordWebhook.js";
+import { isConnected, getWebhookUrl, sendWebhookPayload } from "./state/discordWebhook.js";
+import { buildRollWebhookPayload } from "./state/discordMessage.js";
 import { getBreakpoint, isTouchDevice } from "./responsive.js";
 import { createDicePhysics } from "./physics/DicePhysics.js";
 import { createHandCursor, gripCurlForDie, inradiusFraction } from "./hand/HandCursor.js";
@@ -693,16 +693,11 @@ function forwardRollToDiscord(entry) {
   if (!entry || !isConnected()) return;
   const url = getWebhookUrl();
   if (!url) return;
-  const who = getStoredName();
-  // A name/summary header line, then one line per die TYPE (formatValueLines
-  // — grouped, e.g. "d6: 3, 4"), then the optional total behind the same
-  // showTotal flag. This intentionally does NOT match the sidesheet anymore:
-  // the sidesheet now lists one line per individual die (see rollLogPanel.js
-  // / perDieLines) while Discord keeps this grouped format unchanged.
-  const header = `${who ? `🎲 ${who}` : "🎲"} — ${formatDice(entry)}`;
-  const lines = [header, ...formatValueLines(entry)];
-  if (ROLL_LOG_CONFIG.showTotal) lines.push(`total ${entry.total}`);
-  sendMessage(url, lines.join("\n")).catch(() => {});
+  // Message shape (header + one emoji line per individual die, sorted
+  // D4->D20 — same per-die ordering the sidesheet uses) lives in
+  // discordMessage.js; this just builds the payload and sends it.
+  const payload = buildRollWebhookPayload(entry, getStoredName());
+  sendWebhookPayload(url, payload).catch(() => {});
 }
 
 const beginThrow = () => throwBatcher.begin();

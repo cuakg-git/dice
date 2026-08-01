@@ -48,3 +48,31 @@ export const DICE_ICONS = {
 // against every body color above, including the light D6 (yellow) and D10
 // (cyan). Matches the die outline's ink color for a consistent look.
 export const DICE_NUMBER_COLOR = "#1a1f26";
+
+/**
+ * Same keys again, for Discord messages: webhook `content` is plain text, so
+ * there's no way to show a PNG icon per line there (embeds only offer one
+ * big image + one thumbnail per MESSAGE, not one per line) — a colored emoji
+ * is the closest per-line indicator plain text actually has. Unicode doesn't
+ * have a colored square/circle for every hex above, so this is the nearest
+ * distinguishable approximation, mixing squares and circles as needed:
+ *   D4  #CB1DCD magenta -> 🟪 purple square (closest built-in to magenta)
+ *   D6  #FDF500 yellow  -> 🟨 yellow square
+ *   D8  #1AC5B0 teal    -> 🟩 green square (closest built-in to teal)
+ *   D10 #37EBF3 cyan    -> 🟦 blue square (closest built-in to cyan)
+ *   D12 #9370DB violet  -> 🟣 purple circle (distinct from D4's square so the
+ *                           two purples don't read as the same indicator)
+ *   D20 #E455AE pink    -> 🔴 red circle (no pink emoji exists; red is the
+ *                           nearest warm, and using a circle instead of
+ *                           another square keeps it distinguishable from D8/D10)
+ * This is a deliberate approximation, not a color match — see the alternate
+ * per-type-embed mode noted in discordMessage.js for exact color fidelity.
+ */
+export const DICE_EMOJI = {
+  D4: "🟪",
+  D6: "🟨",
+  D8: "🟩",
+  D10: "🟦",
+  D12: "🟣",
+  D20: "🔴",
+};
