@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Mesa de Dados 3D</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="viewport"></div>
+      <div id="labels"></div>
+      <!-- Roll log: a right-side sidesheet that SLIDES in over the scene (its
+           transform is off-screen by default; #roll-log.is-open brings it in).
+           It's an absolute overlay, so opening/closing it never resizes or
+           reframes the 3D viewport underneath — the physics is untouched. -->
+      <aside id="roll-log" aria-label="Historial de tiradas">
+        <div id="roll-log-head">
+          <span id="roll-log-title">Tiradas</span>
+          <button id="roll-log-clear" type="button" title="Limpiar historial" aria-label="Limpiar historial">Limpiar</button>
+          <button id="roll-log-close" type="button" title="Cerrar" aria-label="Cerrar historial">✕</button>
+        </div>
+        <ol id="roll-log-list"></ol>
+        <p id="roll-log-empty">Todavía no tiraste ningún dado.</p>
+      </aside>
+      <!-- Corner controls (top-right), grouped so they never overlap: the log
+           toggle sits next to the Discord button. -->
+      <div id="corner-controls">
+        <button
+          id="roll-log-toggle"
+          type="button"
+          aria-controls="roll-log"
+          aria-expanded="false"
+          aria-label="Ver historial de tiradas"
+          title="Historial de tiradas"
+        >
+          <span class="corner-btn__icon" aria-hidden="true">☰</span>
+          <span class="corner-btn__label">Tiradas</span>
+        </button>
+        <!-- Discreet entry point to the Discord config. Its label/✓ reflects the
+             connection state — see discordPanel.js. -->
+        <button id="discord-button" type="button" aria-haspopup="dialog" title="Enviar tus tiradas a Discord">
+          <span id="discord-button-label">Discord</span>
+        </button>
+      </div>
+      <div id="hand-widget">
+        <div id="hand-canvas"></div>
+        <div id="hand-name-label-mobile" class="hand-name-label-mobile" title="Cambiar nombre"></div>
+        <div class="hand-controls">
+          <label>Y <input id="hand-rot-y" type="range" min="0" max="360" step="1" value="0" /></label>
+          <label>X <input id="hand-rot-x" type="range" min="0" max="360" step="1" value="0" /></label>
+        </div>
+      </div>
+    </div>
+    <!-- Discord webhook config: a fixed sibling of #app so it overlays the whole
+         viewport and blocks the board underneath just by being topmost (same
+         approach as the name modal). See src/ui/discordPanel.js. -->
+    <div id="discord-modal-overlay" hidden>
+      <div id="discord-modal" role="dialog" aria-modal="true" aria-labelledby="discord-modal-title">
+        <button id="discord-close" type="button" aria-label="Cerrar">✕</button>
+        <h2 id="discord-modal-title">Conectá tus tiradas a Discord</h2>
+        <p id="discord-modal-sub">Pegá la URL de tu webhook y tus tiradas van a aparecer en tu canal.</p>
+
+        <!-- Persistent connection status (criterion 5). data-state drives the
+             color/text; JS flips it between disconnected/saved/connected. -->
+        <div id="discord-status" class="discord-status" data-state="disconnected">
+          <span id="discord-status-text">Sin conectar</span>
+        </div>
+
+        <!-- "¿Cómo consigo esto?" — starts collapsed; native <details> so it's
+             accessible and needs no JS to open. -->
+        <details id="discord-help" class="discord-help">
+          <summary class="discord-help__summary">¿Cómo consigo esta URL?</summary>
+
+          <!-- STEPS. Each <li> is a self-contained block: a text row + a
+               screenshot slot RIGHT THERE, already in the layout. To add a
+               capture later, replace the empty <figure> placeholder's contents
+               with <img src="..." alt="..."> — NOTHING else moves. Do not
+               restructure these <li>s; the CSS (.discord-step / .discord-step__shot)
+               already reserves and positions the image area. -->
+          <ol class="discord-steps">
+            <li class="discord-step">
+              <p class="discord-step__text"><span class="discord-step__n">1</span>En Discord, abrí tu servidor y andá a <b>Configuración del servidor</b>.</p>
+              <figure class="discord-step__shot" data-shot="step-1" aria-hidden="true">
+                <!-- screenshot placeholder: reemplazar por <img> del paso 1 -->
+              </figure>
+            </li>
+            <li class="discord-step">
+              <p class="discord-step__text"><span class="discord-step__n">2</span>Entrá a <b>Integraciones</b> → <b>Webhooks</b>.</p>
+              <figure class="discord-step__shot" data-shot="step-2" aria-hidden="true">
+                <!-- screenshot placeholder: reemplazar por <img> del paso 2 -->
+              </figure>
+            </li>
+            <li class="discord-step">
+              <p class="discord-step__text"><span class="discord-step__n">3</span>Tocá <b>Nuevo webhook</b> y elegí el canal donde querés que aparezcan las tiradas.</p>
+              <figure class="discord-step__shot" data-shot="step-3" aria-hidden="true">
+                <!-- screenshot placeholder: reemplazar por <img> del paso 3 -->
+              </figure>
+            </li>
+            <li class="discord-step">
+              <p class="discord-step__text"><span class="discord-step__n">4</span>Tocá <b>Copiar URL del webhook</b>.</p>
+              <figure class="discord-step__shot" data-shot="step-4" aria-hidden="true">
+                <!-- screenshot placeholder: reemplazar por <img> del paso 4 -->
+              </figure>
+            </li>
+            <li class="discord-step">
+              <p class="discord-step__text"><span class="discord-step__n">5</span>Pegá la URL acá abajo.</p>
+              <figure class="discord-step__shot" data-shot="step-5" aria-hidden="true">
+                <!-- screenshot placeholder: reemplazar por <img> del paso 5 -->
+              </figure>
+            </li>
+          </ol>
+        </details>
+
+        <form id="discord-form" novalidate>
+          <label id="discord-url-label" for="discord-url-input">Pegá acá la URL de tu webhook</label>
+          <input
+            id="discord-url-input"
+            type="text"
+            inputmode="url"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="https://discord.com/api/webhooks/…"
+          />
+          <p id="discord-url-error" class="discord-error" hidden></p>
+
+          <div class="discord-actions">
+            <button id="discord-test" type="submit" class="discord-btn discord-btn--primary">Probar y conectar</button>
+            <button id="discord-disconnect" type="button" class="discord-btn discord-btn--ghost" hidden>Desconectar</button>
+          </div>
+          <p id="discord-feedback" class="discord-feedback" hidden></p>
+        </form>
+      </div>
+    </div>
+    <!-- "What's your name" gate: a fixed sibling of #app (not inside it) so it
+         reliably covers the whole viewport and stacks above everything on
+         the page, independent of #app's own layout/overflow. See
+         src/ui/nameGate.js for the wiring and style.css for why its cursor
+         stays visible even though the rest of the page hides the native one. -->
+    <div id="name-modal-overlay" hidden>
+      <form id="name-modal-form" novalidate>
+        <h2 id="name-modal-title">¿Cómo te llamás?</h2>
+        <input
+          id="name-modal-input"
+          type="text"
+          maxlength="20"
+          autocomplete="off"
+          autocapitalize="words"
+          placeholder="Tu nombre"
+        />
+        <p id="name-modal-error" hidden>Escribí un nombre para continuar.</p>
+        <button id="name-modal-submit" type="submit">Empezar</button>
+      </form>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/hand/handApp.js"></script>
+  </body>
+</html>

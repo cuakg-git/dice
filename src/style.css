@@ -1,0 +1,821 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* JS keeps this in sync with the real visual viewport height (see main.js)
+     as a robust fallback for browsers/situations where 100dvh misbehaves. */
+  --app-vh: 1vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #eef1f5;
+  overscroll-behavior: none;
+}
+
+#app {
+  position: relative;
+  /* 100% (not 100vw) so a scrollbar can never add horizontal overflow. */
+  width: 100%;
+  /* 100vh on mobile browsers includes area the address bar can cover;
+     100dvh tracks the real visible viewport. calc(var(--app-vh)*100) is a
+     JS-driven fallback for engines without dvh support. */
+  height: 100vh;
+  height: calc(var(--app-vh) * 100);
+  height: 100dvh;
+  overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+/* The canvas must cover the FULL viewport — no padding, border or margin
+   anywhere in this chain (safe-area padding here used to shrink the canvas
+   and leave background bands around it). */
+#viewport {
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+#viewport canvas {
+  display: block; /* inline canvases get phantom baseline pixels below */
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* Pointer devices: the 3D hand IS the cursor, so hide the native one.
+   The class lives on <html> (not just #app): the canvas can momentarily be
+   smaller than its container (mid-resize, before the ResizeObserver settles
+   its size), which would otherwise let the pointer land on #viewport/#app
+   underneath — with the native cursor showing there the instant that
+   happens. html/body are listed explicitly too (belt and suspenders on top
+   of inheritance) so there is no element anywhere in the chain the pointer
+   could resolve to, on window entry/exit, that lacks its own `cursor: none`. */
+html.hand-cursor-mode,
+html.hand-cursor-mode body,
+html.hand-cursor-mode #app,
+html.hand-cursor-mode #viewport,
+html.hand-cursor-mode #viewport canvas,
+html.hand-cursor-mode #labels {
+  cursor: none;
+}
+
+#labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Roll log — a right-side SIDESHEET. It's an absolute overlay pinned to the
+   right edge, full height, that slides in/out via `transform` (so it never
+   changes the layout box of #viewport underneath — the 3D scene and physics
+   are untouched whether it's open or closed). Closed = translated fully off
+   the right edge; #roll-log.is-open brings it to rest at x=0. */
+#roll-log {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 300px;
+  max-width: 88vw;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.92);
+  border-left: 1px solid rgba(91, 100, 114, 0.18);
+  box-shadow: -4px 0 18px rgba(28, 34, 43, 0.14);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  color: #3d444f;
+  transform: translateX(100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+}
+
+#roll-log.is-open {
+  transform: translateX(0);
+}
+
+/* Respect users who ask for reduced motion — appear/disappear with no slide. */
+@media (prefers-reduced-motion: reduce) {
+  #roll-log {
+    transition: none;
+  }
+}
+
+#roll-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 10px 14px;
+  border-bottom: 1px solid rgba(91, 100, 114, 0.14);
+  flex: none;
+}
+
+#roll-log-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #78818f;
+  user-select: none;
+}
+
+#roll-log-clear {
+  border: 0;
+  background: transparent;
+  color: #99a2af;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+#roll-log-clear:hover {
+  background: rgba(91, 100, 114, 0.12);
+  color: #5b6472;
+}
+
+#roll-log-close {
+  border: 0;
+  background: transparent;
+  color: #99a2af;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+#roll-log-close:hover {
+  background: rgba(91, 100, 114, 0.12);
+  color: #5b6472;
+}
+
+/* The scrollable part; the list itself is the only thing that overflows. */
+#roll-log-list {
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* don't chain scroll to the page/board */
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+}
+
+#roll-log-empty {
+  margin: 0;
+  padding: 18px 14px;
+  font-size: 12px;
+  color: #9aa2ae;
+  text-align: center;
+}
+/* Hidden as soon as there's at least one entry (JS toggles [hidden]). */
+#roll-log-empty[hidden] {
+  display: none;
+}
+
+.roll-log__item {
+  padding: 8px 9px;
+  border-radius: 7px;
+}
+.roll-log__item + .roll-log__item {
+  margin-top: 4px;
+}
+.roll-log__item:nth-child(odd) {
+  background: rgba(91, 100, 114, 0.06);
+}
+
+/* Discreet summary subtitle: "2d6 + 1d8". */
+.roll-log__dice {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #99a2af;
+  margin-bottom: 3px;
+}
+
+/* Primary content: one row per INDIVIDUAL die (never grouped), stacked with
+   enough vertical gap that a big roll (8-10 dice) still reads as separate
+   items rather than run-together text. The list itself already scrolls
+   (#roll-log-list), so a long roll just grows the item — it can't break the
+   sidesheet's layout. */
+.roll-log__lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.roll-log__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.3;
+  color: #2f3640;
+}
+
+/* Small color swatch keyed to the die's own fixed body color (DICE_COLORS —
+   the same source of truth the 3D dice themselves are painted from), so it's
+   never ambiguous which type a line belongs to. A thin border keeps the
+   lighter colors (D6 yellow, D10 cyan) visible against the sidesheet's
+   near-white background. */
+.roll-log__die-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+}
+
+.roll-log__die-label {
+  flex: none;
+  font-weight: 700;
+  min-width: 2.6em; /* D4..D20 labels line up their "=" regardless of digit count */
+}
+
+.roll-log__die-eq {
+  flex: none;
+  color: #99a2af;
+}
+
+.roll-log__die-value {
+  font-weight: 700;
+}
+
+/* Optional total (ROLL_LOG_CONFIG.showTotal, off by default): a quiet footer. */
+.roll-log__total {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #99a2af;
+}
+
+/* ── Corner controls (top-right): the log toggle + the Discord button, grouped
+   in a row so they can never overlap. ─────────────────────────────────────── */
+#corner-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 40; /* above the sidesheet so the toggle is always reachable */
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#roll-log-toggle,
+#corner-controls #discord-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(91, 100, 114, 0.18);
+  border-radius: 8px;
+  padding: 6px 11px;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 10px rgba(28, 34, 43, 0.12);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5563;
+}
+
+.corner-btn__icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Toggle reflects open state (aria-expanded), so it reads as "active". */
+#roll-log-toggle[aria-expanded="true"] {
+  color: #2f3640;
+  border-color: rgba(61, 90, 241, 0.35);
+  background: rgba(61, 90, 241, 0.08);
+}
+
+@media (max-width: 768px) {
+  #roll-log {
+    width: 280px;
+  }
+  #corner-controls {
+    top: 8px;
+    right: 8px;
+    gap: 6px;
+  }
+  #roll-log-toggle,
+  #corner-controls #discord-button {
+    padding: 5px 9px;
+    font-size: 11px;
+  }
+  /* On the narrowest screens, drop the toggle's text label to save room. */
+  #roll-log-toggle .corner-btn__label {
+    display: none;
+  }
+}
+
+/* "What's your name" modal: fixed, covers the whole viewport, and sits above
+   everything (higher than the roll log's z-index:20 or the hand widget's
+   z-index:10) so it blocks clicks reaching the canvas/board underneath just
+   by being the topmost element — no separate interaction-blocking flag is
+   needed elsewhere in the app. */
+#name-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 34, 43, 0.45);
+  /* Desktop hides the native cursor app-wide via `cursor: none` on
+     html.hand-cursor-mode (see below) — that's an inherited property, so
+     without this override the modal would inherit "none" too and the user
+     couldn't see where they're clicking/typing. `auto` (not `default`)
+     deliberately: it lets each element pick its own normal cursor (I-beam
+     over the input, pointer over the button) instead of forcing one look
+     everywhere. Applied to every descendant, not just the overlay itself,
+     since `cursor` only inherits where nothing more specific overrides it —
+     an inherited "none" from the html class is exactly that kind of
+     override this needs to beat on each element individually. */
+  cursor: auto;
+}
+
+#name-modal-overlay * {
+  cursor: auto;
+}
+
+#name-modal-overlay[hidden] {
+  display: none;
+}
+
+#name-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(300px, 86vw);
+  background: #ffffff;
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 12px 40px rgba(20, 24, 31, 0.28);
+}
+
+#name-modal-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #2f3640;
+}
+
+#name-modal-input {
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(91, 100, 114, 0.3);
+  color: #2f3640;
+}
+
+#name-modal-input:focus {
+  outline: 2px solid #5b7cfa;
+  outline-offset: 1px;
+}
+
+#name-modal-error {
+  margin: 0;
+  font-size: 11px;
+  color: #c23b52;
+}
+
+#name-modal-error[hidden] {
+  display: none;
+}
+
+#name-modal-submit {
+  align-self: flex-end;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 18px;
+  background: #3d5af1;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+#name-modal-submit:hover {
+  background: #2f46c9;
+}
+
+/* Desktop: the name label that follows the hand-cursor (positioned every
+   frame from main.js via a plain `transform: translate(...)`, same
+   technique as .zone-label below). Lives inside #labels, so it inherits
+   `pointer-events: none` from that container — purely visual, never a
+   raycast/click target, per spec. */
+.hand-name-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #46505e;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.hand-name-label[hidden] {
+  display: none;
+}
+
+/* Mobile: the name sits just under the hand in its floating widget. Unlike
+   the desktop label this one CAN be tapped — see nameGate.js's
+   openNameModal() — so it keeps normal pointer-events (the widget's own
+   comment already explains why events inside it never reach the board). */
+.hand-name-label-mobile {
+  flex: none;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7480;
+  padding: 1px 0 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+  cursor: pointer;
+}
+
+/* ── Discord webhook config ──────────────────────────────────────────────
+   The entry-point button lives in #corner-controls (styled together with the
+   log toggle above); only its connected-state accent is specific here. Its ✓
+   state is toggled from JS via data-connected. */
+#discord-button[data-connected="1"] {
+  color: #2f8f56;
+  border-color: rgba(47, 143, 86, 0.35);
+}
+
+/* The modal overlay: fixed, topmost (above the roll log/hand-widget), blocks
+   the board underneath just by being the frontmost element. `cursor: auto` on
+   it + descendants beats the app-wide `cursor: none` (html.hand-cursor-mode)
+   so the native cursor is usable for reading/typing, exactly like the name
+   modal. */
+#discord-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(28, 34, 43, 0.45);
+  cursor: auto;
+}
+#discord-modal-overlay * {
+  cursor: auto;
+}
+#discord-modal-overlay[hidden] {
+  display: none;
+}
+
+#discord-modal {
+  position: relative;
+  width: min(420px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #fff;
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 12px 44px rgba(20, 24, 31, 0.3);
+  color: #2f3640;
+}
+
+#discord-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  border: 0;
+  background: transparent;
+  color: #99a2af;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+#discord-close:hover {
+  background: rgba(91, 100, 114, 0.12);
+  color: #5b6472;
+}
+
+#discord-modal-title {
+  margin: 0 26px 4px 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+#discord-modal-sub {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  color: #6b7480;
+  line-height: 1.4;
+}
+
+/* Persistent status pill (criterion 5). */
+.discord-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin-bottom: 14px;
+}
+.discord-status[data-state="disconnected"] {
+  background: rgba(91, 100, 114, 0.1);
+  color: #78818f;
+}
+.discord-status[data-state="saved"] {
+  background: rgba(214, 158, 46, 0.14);
+  color: #9a6b12;
+}
+.discord-status[data-state="connected"] {
+  background: rgba(47, 143, 86, 0.14);
+  color: #2f8f56;
+}
+
+/* "¿Cómo consigo esto?" — collapsible, starts closed for return users. */
+.discord-help {
+  margin-bottom: 14px;
+  border: 1px solid rgba(91, 100, 114, 0.16);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.discord-help__summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #3d5af1;
+  background: rgba(61, 90, 241, 0.05);
+  user-select: none;
+}
+.discord-help__summary::-webkit-details-marker {
+  display: none;
+}
+.discord-help__summary::before {
+  content: "› ";
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+.discord-help[open] .discord-help__summary::before {
+  transform: rotate(90deg);
+}
+
+.discord-steps {
+  margin: 0;
+  padding: 6px 12px 12px;
+  list-style: none;
+  counter-reset: none;
+}
+
+/* Each step: a text row PLUS a screenshot slot already sitting in the layout.
+   The image area (.discord-step__shot) is reserved and positioned here, so
+   dropping an <img> in later needs no structural change. Text sits above, the
+   capture below — swap `flex-direction`/grid here alone if a side-by-side look
+   is wanted later, still without touching the markup. */
+.discord-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 0;
+  border-top: 1px solid rgba(91, 100, 114, 0.1);
+}
+.discord-step:first-child {
+  border-top: 0;
+}
+.discord-step__text {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #3d444f;
+}
+.discord-step__n {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #3d5af1;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  transform: translateY(1px);
+}
+
+/* Screenshot placeholder. Empty by default (a dashed, subtly-labelled slot);
+   the moment a real <img> is put inside, `:empty` stops matching and the
+   placeholder chrome disappears on its own — no markup or layout change. */
+.discord-step__shot {
+  margin: 0 0 0 28px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.discord-step__shot:empty {
+  min-height: 0; /* reserve no space while there's no image, so text stays tight */
+}
+.discord-step__shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(91, 100, 114, 0.18);
+}
+
+.discord-step__text b {
+  color: #2f3640;
+  font-weight: 700;
+}
+
+/* The one field. */
+#discord-url-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+#discord-url-input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(91, 100, 114, 0.3);
+  color: #2f3640;
+}
+#discord-url-input:focus {
+  outline: 2px solid #5b7cfa;
+  outline-offset: 1px;
+}
+
+.discord-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #c23b52;
+}
+.discord-error[hidden] {
+  display: none;
+}
+
+.discord-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+.discord-btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 16px;
+  font-weight: 700;
+  font-size: 13px;
+}
+.discord-btn--primary {
+  background: #3d5af1;
+  color: #fff;
+}
+.discord-btn--primary:hover {
+  background: #2f46c9;
+}
+.discord-btn--primary:disabled {
+  opacity: 0.6;
+}
+.discord-btn--ghost {
+  background: transparent;
+  color: #99a2af;
+  font-weight: 600;
+}
+.discord-btn--ghost:hover {
+  color: #c23b52;
+}
+.discord-btn--ghost[hidden] {
+  display: none;
+}
+
+.discord-feedback {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  padding: 9px 11px;
+  border-radius: 8px;
+}
+.discord-feedback[hidden] {
+  display: none;
+}
+.discord-feedback[data-kind="pending"] {
+  background: rgba(91, 100, 114, 0.09);
+  color: #6b7480;
+}
+.discord-feedback[data-kind="ok"] {
+  background: rgba(47, 143, 86, 0.13);
+  color: #2f8f56;
+  font-weight: 600;
+}
+.discord-feedback[data-kind="error"] {
+  background: rgba(194, 59, 82, 0.1);
+  color: #c23b52;
+}
+
+.zone-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #5b6472;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 3px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.zone-label--tray {
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+/* Floating hand widget: sits above the board canvas in the bottom-left.
+   It's a separate element, so pointer events inside it stop here and never
+   reach the board canvas (no accidental dice drags); outside its bounds it
+   blocks nothing. */
+#hand-widget {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  width: 220px;
+  height: 260px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  touch-action: none;
+}
+
+#hand-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+#hand-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hand-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 6px 0;
+}
+
+.hand-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #8a93a1;
+  user-select: none;
+}
+
+.hand-controls input[type="range"] {
+  flex: 1;
+  height: 3px;
+  accent-color: #8a93a1;
+}
+
+@media (max-width: 768px) {
+  #hand-widget {
+    width: 32vw;
+    height: 38vw;
+    left: 8px;
+    bottom: 8px;
+  }
+}
