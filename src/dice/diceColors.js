@@ -1,3 +1,18 @@
+// Static imports (NOT template-string paths like `../assets/${type}.png`):
+// Vite has to see a literal import specifier at build time to fingerprint/
+// bundle the file and rewrite it to the right hashed URL in production. A
+// dynamically-built path is invisible to that analysis — it works by
+// accident in dev (Vite's dev server just resolves whatever path hits the
+// filesystem) and then 404s in `vite build`, since nothing told Rollup to
+// ever emit that file. Each import below resolves to the final asset URL
+// (string) at build time, dev and prod alike.
+import d4Icon from "../assets/d4.png";
+import d6Icon from "../assets/d6.png";
+import d8Icon from "../assets/d8.png";
+import d10Icon from "../assets/d10.png";
+import d12Icon from "../assets/d12.png";
+import d20Icon from "../assets/d20.png";
+
 /**
  * Single source of truth for each die type's fixed body color. Every D6 (say)
  * shares this exact color — no more per-instance random tinting — and this is
@@ -11,6 +26,21 @@ export const DICE_COLORS = {
   D10: "#37EBF3",
   D12: "#9370DB",
   D20: "#E455AE",
+};
+
+/**
+ * Same idea, same keys, for each type's PNG icon (transparent background,
+ * near-square but NOT forced to a fixed aspect ratio by any consumer — size
+ * with a fixed height + `width: auto` + `object-fit: contain`, never with
+ * both dimensions fixed, or the original proportions get distorted).
+ */
+export const DICE_ICONS = {
+  D4: d4Icon,
+  D6: d6Icon,
+  D8: d8Icon,
+  D10: d10Icon,
+  D12: d12Icon,
+  D20: d20Icon,
 };
 
 // The numbers are baked directly into each type's face texture (see

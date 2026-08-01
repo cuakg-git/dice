@@ -1,6 +1,6 @@
 import { getRolls, clearRolls, subscribe, formatDice, perDieLines } from "../state/rollLog.js";
 import { ROLL_LOG_CONFIG } from "../state/rollLogConfig.js";
-import { DICE_COLORS } from "../dice/diceColors.js";
+import { DICE_ICONS } from "../dice/diceColors.js";
 
 const OPEN_KEY = "dice.rollLogOpen"; // session-remembered open/closed state
 
@@ -77,10 +77,26 @@ export function createRollLogPanel({ root = document.getElementById("roll-log") 
         const line = document.createElement("div");
         line.className = "roll-log__line";
 
-        const icon = document.createElement("span");
+        // The real per-type PNG (transparent background), not a color swatch.
+        // Decorative — the label text right next to it already names the
+        // type — so it's alt="" and aria-hidden rather than announced twice.
+        const icon = document.createElement("img");
         icon.className = "roll-log__die-icon";
-        icon.style.backgroundColor = DICE_COLORS[type] || "#99a2af";
+        icon.alt = "";
         icon.setAttribute("aria-hidden", "true");
+        icon.decoding = "async";
+        const iconSrc = DICE_ICONS[type];
+        if (iconSrc) {
+          icon.src = iconSrc;
+          // Fallback: if the image can't actually load for some reason, drop
+          // it rather than show a broken-image box — the label + value text
+          // alone are still a complete, legible line.
+          icon.addEventListener("error", () => {
+            icon.hidden = true;
+          });
+        } else {
+          icon.hidden = true;
+        }
 
         const label = document.createElement("span");
         label.className = "roll-log__die-label";
