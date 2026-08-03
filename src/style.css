@@ -886,37 +886,78 @@ body.hand-cursor-active * {
   }
 }
 
-/* "Drag me to roll", shown above the touch hand while it is carrying dice.
-   Sits in #labels (pointer-events: none), so it can never intercept the drag
-   it is advertising. `translate(-50%, -100%)` centres it on, and lifts it
-   above, the projected point main.js positions it at — that transform is
-   applied on top of placeLabelAt's own translate() via a wrapper-free
-   `translate` property, so the two never overwrite each other. */
-.hand-prompt {
+/* Held-dice status tooltip, above the hand while it carries dice. Sits in
+   #labels (pointer-events: none), so on touch it can never intercept the drag
+   its own footer advertises.
+
+   `translate: -50% -100%` centres it on, and lifts it above, the projected
+   point main.js positions it at. That's the standalone `translate` property,
+   NOT `transform` — main.js writes `transform` for the projected position, and
+   the two compose instead of overwriting each other (per spec, translate is
+   applied before transform). */
+.hand-tooltip {
   position: absolute;
   top: 0;
   left: 0;
   translate: -50% -100%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(91, 100, 114, 0.16);
+  box-shadow: 0 2px 10px rgba(28, 34, 43, 0.1);
   font-size: 12px;
   font-weight: 600;
   color: #46505e;
-  background: rgba(255, 255, 255, 0.72);
-  padding: 3px 10px;
-  border-radius: 11px;
   white-space: nowrap;
   user-select: none;
+  animation: hand-tooltip-in 180ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
 
-.hand-prompt[hidden] {
+.hand-tooltip[hidden] {
   display: none;
 }
 
-/* Entrance: a short fade + rise when the first die lands in the hand. */
-.hand-prompt.is-in {
-  animation: hand-prompt-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+.hand-tooltip__row {
+  line-height: 1.5;
+  /* Gives the flap a real third dimension to rotate through; without it the
+     rotateX below is a flat vertical squash instead of a flip. */
+  perspective: 220px;
 }
 
-@keyframes hand-prompt-in {
+/* The one character that flips. inline-block so the transform applies (an
+   inline box ignores transforms), and a fixed min-width so a 1->2 digit change
+   doesn't shift the rest of the line mid-flip. */
+.hand-tooltip__flap {
+  display: inline-block;
+  min-width: 1.1em;
+  text-align: center;
+  font-weight: 700;
+  color: #2f3640;
+  backface-visibility: hidden;
+  will-change: transform;
+}
+
+.hand-tooltip__more {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #99a2af;
+}
+
+.hand-tooltip__footer {
+  margin-top: 5px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(91, 100, 114, 0.16);
+  font-size: 11px;
+  color: #78818f;
+}
+
+.hand-tooltip__more[hidden],
+.hand-tooltip__footer[hidden] {
+  display: none;
+}
+
+@keyframes hand-tooltip-in {
   from {
     opacity: 0;
     translate: -50% calc(-100% + 6px);
@@ -927,8 +968,10 @@ body.hand-cursor-active * {
   }
 }
 
+/* The flip itself is frame-driven from JS (see handTooltip.js), so reduced
+   motion only needs to disable the entrance. */
 @media (prefers-reduced-motion: reduce) {
-  .hand-prompt.is-in {
+  .hand-tooltip {
     animation: none;
   }
 }

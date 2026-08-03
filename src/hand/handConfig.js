@@ -306,6 +306,33 @@ export const HAND_CONFIG = {
       travelArcHeight: 2.4, // world units of bulge at the midpoint of the arc
     },
 
+    // HELD-DIE VALUES: while the hand is carrying dice their value "spins" —
+    // the stored value re-rolls on a timer, faster while the hand is being
+    // shaken, and a tooltip above the hand reports it.
+    //
+    // STATE AND PRESENTATION ONLY. Nothing here touches geometry or physics:
+    // a thrown die's result is still whatever its top face reads when the
+    // body finally sleeps (main.js's settle loop), so randomising cannot
+    // influence a roll. The die is deliberately NOT rotated to match the
+    // randomised value — see the note on `maskRandomizedValues` below and the
+    // module comment in dice/heldValues.js.
+    heldValues: {
+      randomizeIntervalMs: 700, // base rhythm; deliberately unhurried
+      shakeRandomizeMultiplier: 2.5, // rate x this while the shake gesture is live
+      shakeRampDuration: 320, // ms to ease between the two rates, in BOTH directions
+      // Staggers the handful so ten dice never re-roll on the same frame.
+      phaseOffsetMs: 90,
+      // Masked mode (default): the FIRST value a die shows is real, and every
+      // value after it reads "?" — the die is mid-spin, so you don't get to
+      // know it. Turn this off to watch the real numbers tumble instead.
+      // Both modes are fully implemented; this flag is the only difference.
+      maskRandomizedValues: true,
+      splitFlapDuration: 260, // ms per character flip
+      // Beyond this many dice the tooltip stops growing and compacts the
+      // remainder into a single "+N más" line.
+      maxRows: 6,
+    },
+
     // PLATFORM OVERRIDES: only values that genuinely must differ on touch.
     // Shallow-merged over everything above by createHandCursor({ platform }),
     // so all the animation logic and its tuning stay single-sourced.

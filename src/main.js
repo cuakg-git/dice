@@ -13,6 +13,8 @@ import { animateTransform, updateTweens, cancelTween, easeOutCubic } from "./ani
 import { setupInteraction } from "./interaction.js";
 import { getSelection, isSelected, selectDie, deselectDie, addHeldDie, removeHeldDie, clearHeldDice } from "./state/selection.js";
 import { readRecordValue } from "./dice/dieValue.js";
+import { createHeldValues } from "./dice/heldValues.js";
+import { createHandTooltip } from "./ui/handTooltip.js";
 import { addRoll } from "./state/rollLog.js";
 import { createThrowBatcher } from "./state/throwBatches.js";
 import { createRollLogPanel } from "./ui/rollLogPanel.js";
@@ -425,13 +427,23 @@ for (const { name, build } of DIE_TYPES) {
       originalQuaternion: group.quaternion.clone(),
       inTray: false, // has a live physics body on the board
       settled: false, // that body has come to rest (=> counted as selected)
-      value: null, // face-up number once settled; null while rolling ("in transit")
+      // A die ALWAYS has a value, in every state: sitting in the source strip,
+      // held, travelling, mid-flight, rolling, and settled. Seeded just below
+      // from the orientation it was built in, re-rolled by the randomiser
+      // while it's in the hand, and overwritten with the physical read when a
+      // thrown body finally sleeps. `settled` — not this — is what marks a
+      // value as a FINAL rolled result (see the throw batcher).
+      value: null, // seeded immediately after the record is built
+
       dragging: false,
       flying: false, // mid ballistic-flight (kinematic arc) before entering physics
       flight: null, // active flight params (see flickDieIntoBoard)
       scaleRamp: null, // { from, to, start, duration } while transitioning source<->board scale
       body: null,
     };
+    // Seed from the orientation it was actually built in, so even a die that
+    // has never been thrown reports the number it is really showing.
+    record.value = readRecordValue(record);
     records.push(record);
     recordsById.set(record.id, record);
     hitboxToRecord.set(hitbox, record);
@@ -466,6 +478,7 @@ const zoneLabelEls = DIE_TYPES.map(({ name }) => {
 // 60x/sec regardless.
 let viewportRect = viewport.getBoundingClientRect();
 const _labelProjected = new THREE.Vector3();
+const _tooltipAnchor = new THREE.Vector3();
 
 function placeLabelAt(el, worldX, worldY, worldZ) {
   _labelProjected.set(worldX, worldY, worldZ).project(camera);
@@ -528,37 +541,45 @@ function updateHandNameLabel() {
 updateHandNameLabel(); // position it before the first paint, not just from frame 2 onward
 
 // ---------------------------------------------------------------------------
-// "Drag me to roll" (touch only): the affordance telling the player that the
-// hand ITSELF is the throw control, since on touch there is no cursor to
-// suggest it. Shown only while the anchored hand is actually carrying dice.
-// Lives in #labels (pointer-events: none) so it can never intercept the very
-// drag it is advertising.
+// Held-dice status tooltip: sits above the hand while it's carrying dice, one
+// "Tenés un X" line per die, values flipping split-flap style as the
+// randomiser re-rolls them (see dice/heldValues.js and ui/handTooltip.js).
+//
+// On touch it also carries the "Drag me to roll" affordance as a footer line
+// instead of that being its own floating element — it appears under exactly
+// the same condition, so sharing one positioned box means the two can never
+// overlap or fight for space above the hand.
+//
+// Lives in #labels (pointer-events: none), so on touch it can never intercept
+// the very drag it is advertising.
 // ---------------------------------------------------------------------------
 
-const HAND_PROMPT_OFFSET_Z = 2.6; // world units "above" the hand on screen (-Z)
+const HAND_TOOLTIP_OFFSET_Z = 2.6; // world units "above" the hand on screen (-Z)
 
-const handPromptEl = document.createElement("div");
-handPromptEl.className = "hand-prompt";
-handPromptEl.textContent = "Drag me to roll";
-handPromptEl.hidden = true;
-labelsContainer.appendChild(handPromptEl);
+const heldValues = createHeldValues();
+const handTooltip = createHandTooltip({ parent: labelsContainer });
 
-function updateHandPrompt() {
-  if (!handCursor.anchored) return;
-  const show = handCursor.isHoldingAny() && !anyModalOpen();
-  if (show) {
-    const pos = handCursor.getPosition();
-    placeLabelAt(handPromptEl, pos.x, 0, pos.z - HAND_PROMPT_OFFSET_Z);
+function updateHandTooltip(nowMs) {
+  if (anyModalOpen() || !handCursor.isHoldingAny()) {
+    handTooltip.hide();
+    return;
   }
-  if (show === !handPromptEl.hidden) return; // no state change: just repositioned
-  handPromptEl.hidden = !show;
-  // Restart the CSS entrance every time it comes back, rather than only on
-  // the first ever appearance.
-  if (show) {
-    handPromptEl.classList.remove("is-in");
-    void handPromptEl.offsetWidth; // forces a reflow so the animation re-runs
-    handPromptEl.classList.add("is-in");
+  const rows = heldValues.getRows(handCursor.getHeldDice());
+  if (rows.length === 0) {
+    handTooltip.hide();
+    return;
   }
+  handTooltip.sync(rows, handCursor.anchored ? "Drag me to roll" : null);
+  handTooltip.update(nowMs, heldValues.getRate());
+
+  // Positioned like every other world-anchored label; the tooltip's own CSS
+  // centres it on this point and lifts it clear of the hand.
+  const pos = handCursor.getPosition();
+  _tooltipAnchor.set(pos.x, 0, pos.z - HAND_TOOLTIP_OFFSET_Z).project(camera);
+  handTooltip.place(
+    (_tooltipAnchor.x * 0.5 + 0.5) * viewportRect.width,
+    (1 - (_tooltipAnchor.y * 0.5 + 0.5)) * viewportRect.height
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +883,6 @@ function rampScale(record, toScale, duration = SCALE_TRANSITION_MS) {
 }
 
 function returnDieToTable(record) {
-  record.value = null; // back in the source strip: it isn't showing a result
   const targetRadius = dieWorldRadius(record, sourceDieRadius);
   rampScale(record, targetRadius / record.dieType.boundingRadius, RETURN_DURATION_MS);
   animateTransform(record.group, {
@@ -871,6 +891,9 @@ function returnDieToTable(record) {
     duration: RETURN_DURATION_MS,
     onComplete: () => {
       record.restingScale = scaleForRadius(record.dieType, targetRadius);
+      // Home again in its original orientation: re-read so its value matches
+      // the face it is actually showing in the strip.
+      record.value = readRecordValue(record);
       updateHitboxSizes();
     },
   });
@@ -880,7 +903,14 @@ function returnDieToTable(record) {
 // "Still in play" = has a body on the board, or is mid ballistic flight.
 const throwBatcher = createThrowBatcher({
   isLive: (record) => record.inTray || record.flying,
-  isSettled: (record) => record.settled && record.value !== null,
+  // `settled` alone, deliberately: it used to also require `value !== null`,
+  // which worked only because a value was cleared on every state change. Now
+  // that a die ALWAYS has a value, that clause would be a tautology — and a
+  // misleading one, since a held die's randomised value is non-null too.
+  // `settled` is set in the same breath as the physical read (see the settle
+  // loop), and only ever for a die with a live body at rest, so it is the
+  // precise signal for "this die's result is final".
+  isSettled: (record) => record.settled,
   describe: (record) => ({ typeName: record.typeName, value: record.value }),
   onRoll: (dice) => {
     const entry = addRoll(dice);
@@ -975,7 +1005,10 @@ function throwDieIntoTray(record, dropX, dropZ, velX, velZ) {
   });
   record.inTray = true;
   record.settled = false;
-  record.value = null; // rolling: value is in transit until it stops
+  // Value is deliberately NOT cleared: it keeps reading as whatever it last
+  // showed while it tumbles, and the settle loop overwrites it with the real
+  // physical read the moment the body sleeps. `settled` is the flag that says
+  // "this is a final result" — see the throw batcher.
   enrollInThrow(record);
   updateHitboxSizes();
 }
@@ -1078,7 +1111,8 @@ function flickDieIntoBoard(record, releaseX, releaseZ, velX, velZ, speed) {
 
   record.flying = true;
   record.settled = false;
-  record.value = null; // in flight: value is in transit until it lands and stops
+  // Keeps its last value through the arc (see throwDieIntoTray's note); the
+  // physical read happens when it lands and settles.
   enrollInThrow(record);
   record.flight = {
     startX,
@@ -1185,7 +1219,8 @@ function addDieToHand(record) {
     record.inTray = false;
     record.settled = false;
   }
-  record.value = null; // in the hand: no result until it's rolled again
+  // Keeps its current value as it enters the hand — that real number is what
+  // the tooltip shows first, before the randomiser starts re-rolling it.
   // Marks it in-transit; also drops it from the ordered board selection.
   addHeldDie(record.id, record.typeName);
 
@@ -1195,6 +1230,9 @@ function addDieToHand(record) {
     dieWorldScale: dieScale,
     gripCurl: gripCurlForDie(record.dieType),
   });
+  // In the hand: its value starts spinning. Stops the moment it leaves (every
+  // release path below calls remove/clear), after which physics owns it again.
+  heldValues.add(record);
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,7 +1269,7 @@ function sendDieToHand(record) {
     record.inTray = false;
     record.settled = false;
   }
-  record.value = null;
+  // Keeps its current value on the way to the hand (see addDieToHand's note).
   addHeldDie(record.id, record.typeName);
 
   const dieScale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
@@ -1275,6 +1313,9 @@ function updateTravels() {
       // Reparents into the palm, re-lays out the whole cluster, and starts the
       // grip tween — the fingers close as it arrives.
       handCursor.hold(record, { dieWorldScale: tr.dieScale, gripCurl: tr.gripCurl });
+      // Randomising starts on arrival, not at tap time: the value shouldn't
+      // already be spinning while the die is still in the air.
+      heldValues.add(record);
     }
   }
 }
@@ -1324,6 +1365,7 @@ function disperseVelocity(velX, velZ) {
 function throwAllHeld() {
   const velocity = handCursor.getVelocity();
   const released = handCursor.releaseAll(); // detaches all, preserving world transforms
+  heldValues.clear(); // out of the hand: physics owns the value again
   clearHeldDice();
   beginThrow(); // one gesture => one roll-log entry, however many dice
   for (const record of released) {
@@ -1344,6 +1386,7 @@ function throwAllHeld() {
 /** Drops the whole handful dead (click on empty): destination by position, no throw velocity. */
 function releaseAllHeld() {
   const released = handCursor.releaseAll();
+  heldValues.clear(); // out of the hand: physics owns the value again
   clearHeldDice();
   beginThrow(); // dropping a handful onto the board is still one roll
   for (const record of released) {
@@ -1355,6 +1398,7 @@ function releaseAllHeld() {
 /** Takes one die back out of the hand and sends it home; the rest stay held. */
 function removeDieFromHand(record) {
   if (!handCursor.releaseOne(record)) return;
+  heldValues.remove(record);
   removeHeldDie(record.id);
   returnDieToTable(record);
 }
@@ -1572,8 +1616,9 @@ onFrame((time) => {
   //
   // Settling is also when a die's value is read — once, off the pose it
   // actually came to rest in, not every frame. The reverse transition matters
-  // too: a settled die that gets knocked back into motion goes back to "in
-  // transit" (value null) and will be re-read when it stops again.
+  // too: a settled die knocked back into motion stops counting as a final
+  // result (it keeps its last value, but `settled` goes false) and is re-read
+  // when it stops again.
   for (const record of records) {
     if (!record.inTray) continue;
     const sleeping = physics.isSleeping(record);
@@ -1583,7 +1628,6 @@ onFrame((time) => {
       if (!isSelected(record.id)) selectDie(record.id, record.typeName);
     } else if (!sleeping && record.settled) {
       record.settled = false;
-      record.value = null;
     }
   }
 
@@ -1599,7 +1643,10 @@ onFrame((time) => {
   // Both read the hand's position for THIS frame, so they run after its
   // update rather than before it (a die in flight aims at the live palm).
   updateTravels();
-  updateHandPrompt();
+  // Re-rolls held values, keyed off the hand's OWN shake state so the faster
+  // rhythm and the left hand appearing are always the same gesture.
+  heldValues.update(dt * 1000, { shaking: handCursor.getShakeState().shakeActive });
+  updateHandTooltip(time);
   // After physics.sync above, so trails read this frame's die positions.
   launchEffects.update(dt);
   // Re-evaluated now that this frame's fade tween has advanced — see
