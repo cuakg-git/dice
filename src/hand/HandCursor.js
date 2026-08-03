@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { createHand } from "./Hand.js";
 import { HAND_CONFIG, restRotationDegrees } from "./handConfig.js";
-import { easeOutCubic } from "../animation.js";
+import { easeOutCubic, easeInOutCubic } from "../animation.js";
 
 /**
  * The desktop hand-cursor: the hand rig living in the main dice scene,
@@ -27,15 +27,38 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
   const tiltGroup = new THREE.Group();
   tiltGroup.name = "manoTilt";
 
+  // Throw wind-up: yet another wrapper, one level ABOVE the cup, carrying the
+  // cock-back rotation + recoil offset + slight contraction. Same layering
+  // contract as tilt and cup — it only ever writes its OWN transform, so tilt
+  // (parent), cup roll (child) and the rest pose (grandchild) all keep
+  // working untouched and simply compose. It wraps the right hand ONLY, not
+  // leftAnim: when you throw out of a two-handed cup the hands separate (the
+  // throwing hand goes back, the other opens away), which is exactly the
+  // motion the left hand's own release animation provides.
+  const windupGroup = new THREE.Group();
+  windupGroup.name = "manoCarga";
+  tiltGroup.add(windupGroup);
+
+  // Follow-through: the reaction beat, one more layer under the wind-up. Its
+  // own group for the same reason every other layer has one — it writes only
+  // its own rotation, so tilt (grandparent), wind-up (parent), cup roll
+  // (child) and the rest pose (grandchild) all keep working and simply
+  // compose. Sitting UNDER the wind-up is what makes the sequence read as one
+  // continuous motion: as the wind-up unwinds after release, this rotation is
+  // already spinning out from within it rather than fighting it.
+  const followGroup = new THREE.Group();
+  followGroup.name = "manoFollowThrough";
+  windupGroup.add(followGroup);
+
   // The right hand's half of the dice cup: while the shake is active this
   // wrapper blends from identity toward cup.right's rotation/offset, rolling
   // the hand (die and all — the die rides holdAnchor inside) into the V of
-  // the cup. Sitting BETWEEN tiltGroup and hand.root it leaves the rest
-  // rotation on hand.root untouched, same contract as the tilt itself.
+  // the cup. Sitting BETWEEN the wind-up group and hand.root it leaves the
+  // rest rotation on hand.root untouched, same contract as the tilt itself.
   const cupRight = new THREE.Group();
   cupRight.name = "manoCopaDerecha";
   cupRight.add(hand.root);
-  tiltGroup.add(cupRight);
+  followGroup.add(cupRight);
 
   // --- Left (mirror) hand: the other half of the dice cup -----------------
   // Built once and parked invisible under the SAME tilt group, so it rides
@@ -161,6 +184,195 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
   let leftState = "hidden"; // hidden | entering | visible | exiting
   let coupling = 0; // 0..1 couple-in progress
   let couplingEased = 0; // easeOutCubic(coupling), shared with the finger blend
+  // Set when the dice leave while the left hand is on screen: turns the
+  // normal shake-ended retreat into the faster "open the hands and let go"
+  // release (see releaseAll + the left-hand block in update).
+  let leftReleasing = false;
+  let leftOpenBlend = 0; // 0..1 how far the left fingers have splayed open on release
+
+  // --- Throw anticipation (wind-up / micro-hold) ----------------------
+  // State machine:
+  //   idle -> winding -> [hold] -> charged -> recovering -> idle
+  // "charged" is full wind-up held while the gesture continues; "hold" is the
+  // brief near-freeze at the top of the charge that only fast throws get.
+  // Any state drops straight to "recovering" the moment the gesture slows
+  // (user changed their mind) or the dice actually leave (follow-through).
+  const throwCfg = c.throwAnim;
+  const windupMaxAngle = THREE.MathUtils.degToRad(throwCfg.maxAngleDeg);
+  let windupState = "idle";
+  let windupAmount = 0; // 0..1 ramp progress
+  let windupIntensity = 0; // 0..1 from gesture speed — how strong the pose reads
+  let windupPeakSpeed = 0; // max speed seen this gesture, decides hold eligibility
+  let windupDirX = 0; // gesture direction in the rig's local screen frame...
+  let windupDirY = 0; // ...(local X = world X, local Y = world -Z)
+  let holdStartMs = 0;
+  let windupCurlAdd = 0; // extra finger clamp this frame, applied in the finger loop
+  let throwVelX = 0; // dedicated fast EMA of the gesture velocity (see config note)
+  let throwVelZ = 0;
+
+  // --- Follow-through (reaction) --------------------------------------
+  // idle -> rotating -> holding -> returning -> idle. Targets are captured
+  // once, from the release velocity, then played out open-loop — the gesture
+  // is over by then, so nothing here reads live input.
+  const ftCfg = c.followThrough;
+  let ftState = "idle";
+  let ftProgress = 0; // 0..1 raw ramp during "rotating"
+  let ftAmount = 0; // applied 0..1 (eased on the way out, sprung on the way back)
+  let ftVel = 0; // spring velocity for the damped return
+  let ftHoldStart = 0;
+  let ftTargetY = 0; // captured supination/pronation angle (radians)
+  let ftTargetX = 0; // captured up/down tip angle (radians)
+
+  // --- Release resistance ---------------------------------------------
+  // A short window after a real throw where the hand chases the pointer more
+  // slowly, so it lags behind the die instead of overtaking it. Purely a
+  // multiplier on the follow rate — the target keeps updating normally, so
+  // no input is ever dropped or delayed.
+  const resistCfg = c.releaseResistance;
+  let resistElapsed = 0; // ms into the window
+  let resistDuration = 0; // 0 = not resisting
+  let resistStrength = 1; // follow-rate multiplier at the START of the window
+
+  /**
+   * Arms the resistance window from the throw's own velocity. Same speed
+   * gate as the follow-through, so a no-velocity deposit arms nothing.
+   */
+  function startReleaseResistance(velX, velZ) {
+    if (!resistCfg.enabled) return false;
+    const speed = Math.hypot(velX, velZ);
+    if (speed < resistCfg.minSpeed) return false;
+
+    let force = 1;
+    if (resistCfg.scalesWithForce) {
+      const span = Math.max(resistCfg.fullSpeed - resistCfg.minSpeed, 1e-4);
+      const t = THREE.MathUtils.clamp((speed - resistCfg.minSpeed) / span, 0, 1);
+      // Lerp from a floor rather than from 0, so crossing the threshold isn't
+      // a visible on/off step.
+      force = THREE.MathUtils.lerp(resistCfg.minForceFraction, 1, t);
+    }
+
+    resistDuration = resistCfg.durationMs * force;
+    // Weaker throws also drag less hard, not just for less time.
+    resistStrength = THREE.MathUtils.lerp(1, resistCfg.strength, force);
+    resistElapsed = 0;
+    return true;
+  }
+
+  /**
+   * 0..1 recovery fraction at `elapsedMs` into a `durationMs` window: flat at
+   * 0 (full resistance) through `sustainFraction`, then an easeInOutCubic
+   * climb to 1. The plateau is what makes the drag actually readable — a
+   * curve that starts recovering immediately is mostly gone before the eye
+   * catches it. easeInOutCubic (not easeOutCubic) for the climb so the join
+   * where the plateau ends has zero slope on both sides, and the hand still
+   * decelerates INTO full speed rather than snapping onto it.
+   */
+  function resistanceRecovery(elapsedMs, durationMs, sustainFraction) {
+    const t = elapsedMs / durationMs;
+    if (t <= sustainFraction) return 0;
+    const span = Math.max(1 - sustainFraction, 1e-4);
+    return easeInOutCubic((t - sustainFraction) / span);
+  }
+
+  /** Drops the window immediately (grabbing a die must never feel blocked). */
+  function clearReleaseResistance() {
+    resistDuration = 0;
+    resistElapsed = 0;
+    resistStrength = 1;
+  }
+
+  // --- Zone scale: smaller over the source strip, full size over the board.
+  // `zoneBounds` is the board rectangle (fed in from main.js, the same one
+  // that decides where a released die lands), null until the caller sets it.
+  // `inOriginZone` is the last resolved side of the hysteresis gap, so
+  // straddling the boundary can't flip it back and forth every frame.
+  const zoneCfg = c.zoneScale;
+  let zoneBounds = null;
+  let inOriginZone = false;
+  let zoneScaleFrom = 1;
+  let zoneScaleTo = 1;
+  let zoneScaleStart = 0;
+  let zoneScaleCurrent = 1;
+
+  /** Board rectangle the hand's own position is checked against each frame. */
+  function setZoneBounds(bounds) {
+    zoneBounds = bounds;
+  }
+
+  /** Starts (or redirects, from wherever it currently sits) the size tween. */
+  function startZoneScale(toScale) {
+    if (toScale === zoneScaleTo) return; // already headed there
+    zoneScaleFrom = zoneScaleCurrent;
+    zoneScaleTo = toScale;
+    zoneScaleStart = clockMs;
+  }
+
+  /**
+   * Resolves which zone the hand's own rendered position is in, with a dead
+   * zone straddling the board edge: growing back to full size requires being
+   * `zoneHysteresisMargin` world units INSIDE the board, shrinking requires
+   * being that far OUTSIDE it. Whichever side was last resolved holds for
+   * anything in between, so resting on the seam can't flicker.
+   */
+  function updateZoneScale() {
+    if (zoneBounds) {
+      const m = zoneCfg.zoneHysteresisMargin;
+      const dx = Math.abs(pivot.position.x - zoneBounds.centerX);
+      const dz = Math.abs(pivot.position.z - zoneBounds.centerZ);
+      if (inOriginZone) {
+        const clearlyOverBoard = dx <= zoneBounds.halfWidth - m && dz <= zoneBounds.halfDepth - m;
+        if (clearlyOverBoard) {
+          inOriginZone = false;
+          startZoneScale(1);
+        }
+      } else {
+        const clearlyOverSource = dx > zoneBounds.halfWidth + m || dz > zoneBounds.halfDepth + m;
+        if (clearlyOverSource) {
+          inOriginZone = true;
+          startZoneScale(zoneCfg.originZoneHandScale);
+        }
+      }
+    }
+
+    const duration = zoneCfg.handScaleTransitionDuration;
+    const t = duration > 0 ? THREE.MathUtils.clamp((clockMs - zoneScaleStart) / duration, 0, 1) : 1;
+    zoneScaleCurrent = THREE.MathUtils.lerp(zoneScaleFrom, zoneScaleTo, easeOutCubic(t));
+    // Held dice are parented under the palm, inside this same pivot, so they
+    // pick up this factor automatically through the transform hierarchy —
+    // nothing else needs to touch their scale for them to shrink/grow with
+    // the hand in lockstep (see hold()/layoutCluster()'s local-space math).
+    pivot.scale.setScalar(scale * zoneScaleCurrent);
+  }
+
+  /**
+   * Captures the follow-through pose from the throw's own velocity vector.
+   * Direction picks the sense of each axis, speed picks the magnitude.
+   * Returns false (and arms nothing) for a no-velocity deposit.
+   */
+  function startFollowThrough(velX, velZ) {
+    const speed = Math.hypot(velX, velZ);
+    if (speed < ftCfg.minSpeed) return false;
+
+    const span = Math.max(ftCfg.fullSpeed - ftCfg.minSpeed, 1e-4);
+    const mag = THREE.MathUtils.clamp((speed - ftCfg.minSpeed) / span, 0, 1);
+    const dirX = velX / speed; // +1 = throw screen-right
+    const dirZ = velZ / speed; // +1 = throw screen-down
+
+    // Longitudinal axis (local Y): left throw supinates a long way (palm ends
+    // up), right throw pronates a short way (palm stays hidden). -dirX gives
+    // left a positive roll; the per-side magnitude is what distinguishes them.
+    const sideMax = dirX < 0 ? ftCfg.supinationDeg : ftCfg.pronationDeg;
+    ftTargetY = -dirX * mag * THREE.MathUtils.degToRad(sideMax) * (ftCfg.invertY ? -1 : 1);
+    // Screen-vertical component tips the hand along the gesture; up and down
+    // land on opposite signs by construction.
+    ftTargetX = -dirZ * mag * THREE.MathUtils.degToRad(ftCfg.maxRotationXDeg) * (ftCfg.invertX ? -1 : 1);
+
+    ftState = "rotating";
+    ftProgress = 0;
+    ftAmount = 0;
+    ftVel = 0;
+    return true;
+  }
 
   function setVisible(visible) {
     pivot.visible = visible;
@@ -248,6 +460,11 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
    */
   function hold(record, { dieWorldScale, gripCurl }) {
     if (heldDice.includes(record)) return;
+    // Grabbing outranks the post-throw drag: the moment the player reaches for
+    // another die the hand must track at full speed again, or the interaction
+    // feels blocked. Cheap and unconditional — clearing an inactive window is
+    // a no-op.
+    clearReleaseResistance();
     const wasEmpty = heldDice.length === 0;
     hand.holdAnchor.add(record.group);
     record._holdWorldScale = dieWorldScale;
@@ -287,6 +504,23 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     for (const rec of out) scene.attach(rec.group);
     heldDice.length = 0;
     startGrip(0);
+    // Anticipation/reaction bookkeeping ONLY — deliberately after the dice are
+    // already detached and about to be returned. These lines just flip state
+    // that the next update() reads; none of them waits on an animation, so the
+    // dice leave on this very call no matter what the wind-up was doing.
+    // Whatever charge was built simply decays from here while the
+    // follow-through spins out on its own layer.
+    if (windupState !== "idle") windupState = "recovering";
+    if (leftAnim.visible) leftReleasing = true;
+    // Reads the hand's own measured velocity — the SAME source main.js passes
+    // to the throw — so the rotation always matches where the dice actually
+    // went. A no-velocity deposit arms nothing (startFollowThrough bails).
+    const relVel = getVelocity();
+    startFollowThrough(relVel.x, relVel.z);
+    // Same velocity, same gate: the drag-behind and the wrist rotation are two
+    // halves of one "the hand spends itself" beat, so they arm together and
+    // run over the same window.
+    startReleaseResistance(relVel.x, relVel.z);
     return out;
   }
 
@@ -323,10 +557,24 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
   function update(dt, timeSeconds) {
     if (!pivot.visible) return;
 
+    // Post-throw resistance: scales the follow rate down, holds it there for
+    // most of the window, then eases back to normal (see resistanceRecovery
+    // above for why it's a plateau-then-ease rather than a straight ease).
+    let followRate = c.followLerpPerSecond;
+    if (resistDuration > 0) {
+      resistElapsed += dt * 1000;
+      if (resistElapsed >= resistDuration) {
+        clearReleaseResistance();
+      } else {
+        const recovered = resistanceRecovery(resistElapsed, resistDuration, resistCfg.sustainFraction);
+        followRate *= THREE.MathUtils.lerp(resistStrength, 1, recovered);
+      }
+    }
+
     // Exponential smoothing: framerate-independent, so the chase feels the
     // same at 60 and 144 fps (a raw per-frame lerp would not).
     if (hasTarget && dt > 0) {
-      const alpha = 1 - Math.exp(-c.followLerpPerSecond * dt);
+      const alpha = 1 - Math.exp(-followRate * dt);
       pivot.position.x += (target.x - pivot.position.x) * alpha;
       pivot.position.z += (target.y - pivot.position.z) * alpha;
     }
@@ -335,6 +583,8 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     clockMs += dt * 1000;
     history.push({ x: pivot.position.x, z: pivot.position.z, t: clockMs });
     if (history.length > c.velocityHistory) history.shift();
+
+    updateZoneScale();
 
     // Grip tween.
     if (gripStart >= 0) {
@@ -431,33 +681,164 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
       tiltGroup.rotation.x = tiltAngleX;
       tiltGroup.rotation.y = tiltAngleY;
 
+      // --- Throw anticipation ------------------------------------------
+      // Its own fast EMA over the same raw per-frame velocity the tilt and
+      // shake read (see velocitySmoothing in config for why the tilt's slower
+      // one can't be reused). Writes only windupGroup, so tilt/cup/rest/idle
+      // are all untouched.
+      const throwAlpha = 1 - Math.exp(-throwCfg.velocitySmoothing * dt);
+      throwVelX += (rawVelX - throwVelX) * throwAlpha;
+      throwVelZ += (rawVelZ - throwVelZ) * throwAlpha;
+      const throwSpeed = Math.hypot(throwVelX, throwVelZ);
+
+      const throwIntent = heldDice.length > 0 && throwSpeed >= throwCfg.intentVelocity;
+
+      // Track the gesture direction while charging, but NOT during the hold —
+      // freezing it is what makes the hold read as a held pose rather than a
+      // pose that keeps drifting with the mouse.
+      if (throwIntent && throwSpeed > 1e-4 && windupState !== "hold") {
+        windupDirX = throwVelX / throwSpeed;
+        windupDirY = -throwVelZ / throwSpeed; // local Y is world -Z (screen up)
+        // Proportional to gesture speed, capped: a hard flick reads much
+        // more loaded than a lazy one, but never past the authored maximum.
+        const span = Math.max(throwCfg.fullVelocity - throwCfg.intentVelocity, 1e-4);
+        windupIntensity = THREE.MathUtils.clamp((throwSpeed - throwCfg.intentVelocity) / span, 0, 1);
+      }
+
+      const windStep = throwCfg.windupDurationMs > 0 ? (dt * 1000) / throwCfg.windupDurationMs : 1;
+      const recoverStep = throwCfg.recoverDurationMs > 0 ? (dt * 1000) / throwCfg.recoverDurationMs : 1;
+
+      if (windupState === "idle") {
+        if (throwIntent) {
+          windupState = "winding";
+          windupPeakSpeed = throwSpeed;
+        }
+      } else if (windupState === "winding") {
+        windupPeakSpeed = Math.max(windupPeakSpeed, throwSpeed);
+        if (!throwIntent) {
+          windupState = "recovering"; // slowed without releasing: unwind gracefully
+        } else {
+          windupAmount = Math.min(1, windupAmount + windStep);
+          if (windupAmount >= 1) {
+            // Only a genuinely hard throw earns the micro-hold.
+            const earnsHold = windupPeakSpeed >= throwCfg.holdMinVelocity && throwCfg.holdDurationMs > 0;
+            windupState = earnsHold ? "hold" : "charged";
+            holdStartMs = clockMs;
+          }
+        }
+      } else if (windupState === "hold") {
+        if (!throwIntent) windupState = "recovering";
+        else if (clockMs - holdStartMs >= throwCfg.holdDurationMs) windupState = "charged";
+      } else if (windupState === "charged") {
+        windupPeakSpeed = Math.max(windupPeakSpeed, throwSpeed);
+        if (!throwIntent) windupState = "recovering";
+      } else if (windupState === "recovering") {
+        windupAmount = Math.max(0, windupAmount - recoverStep);
+        if (throwIntent && heldDice.length > 0) {
+          windupState = "winding"; // picked the gesture back up mid-unwind
+        } else if (windupAmount <= 0) {
+          windupState = "idle";
+          windupPeakSpeed = 0;
+          windupIntensity = 0;
+        }
+      }
+
+      // How strongly the pose reads right now: ramp progress x gesture
+      // strength. easeOutCubic front-loads it so the charge is visible almost
+      // immediately rather than creeping in over the full duration.
+      const windupBlend = easeOutCubic(windupAmount) * windupIntensity;
+      const lean = windupMaxAngle * windupBlend;
+      // A near-freeze still needs a pulse of life, or it reads as a dropped
+      // frame instead of a held beat.
+      const holdMicro =
+        windupState === "hold" ? Math.sin(clockMs * 0.06) * throwCfg.holdMicroAmp : 0;
+
+      // Cock BACK = rotate so the fingertips travel opposite the gesture.
+      // About local Z: fingertips swing across the screen plane (horizontal
+      // gestures). About local X: fingertips rear up toward the camera
+      // (vertical gestures). Recoil translates the whole hand the other way.
+      windupGroup.rotation.z = lean * windupDirX + holdMicro;
+      windupGroup.rotation.x = lean * windupDirY;
+      windupGroup.position.x = -windupDirX * throwCfg.backDistance * windupBlend;
+      windupGroup.position.y = -windupDirY * throwCfg.backDistance * windupBlend;
+      windupGroup.scale.setScalar(THREE.MathUtils.lerp(1, throwCfg.scaleContraction, windupBlend));
+      windupCurlAdd = throwCfg.extraCurl * windupBlend;
+
+      // --- Follow-through ----------------------------------------------
+      // Pure playback of the pose captured at release; never reads live
+      // input, so it can't be perturbed by whatever the pointer does after
+      // the throw. Writes only followGroup.
+      if (ftState === "rotating") {
+        ftProgress = Math.min(1, ftProgress + (dt * 1000) / Math.max(ftCfg.durationMs, 1e-4));
+        ftAmount = easeOutCubic(ftProgress); // fast out, decelerating — a motion spending itself
+        if (ftProgress >= 1) {
+          ftState = "holding";
+          ftHoldStart = clockMs;
+        }
+      } else if (ftState === "holding") {
+        ftAmount = 1;
+        if (clockMs - ftHoldStart >= ftCfg.holdDurationMs) {
+          ftState = "returning";
+          ftVel = 0;
+        }
+      } else if (ftState === "returning") {
+        // Damped spring back to 0 rather than an eased ramp: returnDamping < 1
+        // gives a little overshoot, so the hand *settles* instead of snapping
+        // to rest. Framerate-independent (integrated against dt).
+        const omega = (2 * Math.PI) / Math.max(ftCfg.returnDurationMs / 1000, 1e-4);
+        ftVel += (-omega * omega * ftAmount - 2 * ftCfg.returnDamping * omega * ftVel) * dt;
+        ftAmount += ftVel * dt;
+        if (Math.abs(ftAmount) < 1e-3 && Math.abs(ftVel) < 1e-2) {
+          ftAmount = 0;
+          ftVel = 0;
+          ftState = "idle";
+        }
+      }
+
+      followGroup.rotation.y = ftTargetY * ftAmount;
+      followGroup.rotation.x = ftTargetX * ftAmount;
+
       // Left hand couples in while shaking a full hand, out otherwise (which
       // also covers letting the dice go: empty hand flips wantVisible false).
       const wantVisible = shakeActive && heldDice.length > 0;
       if (wantVisible && leftState !== "visible") leftState = "entering";
       else if (!wantVisible && (leftState === "visible" || leftState === "entering")) leftState = "exiting";
 
-      const step = (dt * 1000) / shakeCfg.couplingMs;
+      // Letting the dice go gets its own, faster exit than "the shake just
+      // petered out" — the retreat has to land with the throw, not trail it.
+      const exitMs = leftReleasing ? throwCfg.leftReleaseDurationMs : shakeCfg.couplingMs;
+      const enterStep = (dt * 1000) / shakeCfg.couplingMs;
+      const exitStep = (dt * 1000) / Math.max(exitMs, 1e-4);
       if (leftState === "entering") {
-        coupling = Math.min(1, coupling + step);
+        coupling = Math.min(1, coupling + enterStep);
         if (coupling >= 1) leftState = "visible";
       } else if (leftState === "exiting") {
-        coupling = Math.max(0, coupling - step);
-        if (coupling <= 0) leftState = "hidden";
+        coupling = Math.max(0, coupling - exitStep);
+        if (coupling <= 0) {
+          leftState = "hidden";
+          leftReleasing = false; // fully off screen: back to the normal retreat next time
+        }
       }
 
       couplingEased = easeOutCubic(coupling);
       const e = couplingEased;
 
+      // Linear (not eased) so the opening starts the instant the dice leave —
+      // easeOutCubic on the way down is back-loaded, which would delay the
+      // visible "hands open" past the moment it's meant to punctuate.
+      const leftOpen = leftReleasing ? 1 - coupling : 0;
+
       leftAnim.visible = leftState !== "hidden";
       if (leftAnim.visible) {
+        const rel = throwCfg.leftReleaseOffset;
         leftAnim.position.set(
-          THREE.MathUtils.lerp(leftEntrance.x, leftAcople.x, e),
-          THREE.MathUtils.lerp(leftEntrance.y, leftAcople.y, e),
-          THREE.MathUtils.lerp(leftEntrance.z, leftAcople.z, e)
+          THREE.MathUtils.lerp(leftEntrance.x, leftAcople.x, e) + rel.x * leftOpen,
+          THREE.MathUtils.lerp(leftEntrance.y, leftAcople.y, e) + rel.y * leftOpen,
+          THREE.MathUtils.lerp(leftEntrance.z, leftAcople.z, e) + rel.z * leftOpen
         );
         leftAnim.scale.setScalar(THREE.MathUtils.lerp(cupCfg.entrance.scale, 1, e));
       }
+      leftOpenBlend = leftOpen; // consumed by the left finger loop below
 
       // Right half rolls into (and back out of) the cup with the same eased
       // coupling, so both halves of the V arrive/leave in step. At e=0 this
@@ -505,6 +886,10 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
       // the hollow half-open cup wall — the die is enclosed by BOTH palms
       // now, so the right hand doesn't need to clench it alone.
       if (couplingEased > 0) curl = THREE.MathUtils.lerp(curl, cupCfg.right.pose[i] + micro, couplingEased);
+      // Wind-up clamps down LAST, on top of whatever pose won above, so the
+      // "grip tightens before the throw" beat still reads even mid-cup (where
+      // the cup blend would otherwise have flattened it away).
+      if (windupCurlAdd > 0) curl = Math.min(1, curl + windupCurlAdd);
       hand.setFingerCurl(i, curl);
     }
 
@@ -513,13 +898,70 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     if (leftAnim.visible) {
       for (let i = 0; i < leftHand.fingerCount; i++) {
         const micro = c.holdIdleAmp * Math.sin(2 * Math.PI * idle.freqHz * timeSeconds + i * idle.phaseStep);
-        leftHand.setFingerCurl(i, cupCfg.left.pose[i] + micro);
+        let curl = cupCfg.left.pose[i] + micro;
+        // Releasing: splay open as it pulls away — the visible "let go".
+        if (leftOpenBlend > 0) curl = THREE.MathUtils.lerp(curl, throwCfg.leftReleaseOpenCurl, leftOpenBlend);
+        leftHand.setFingerCurl(i, curl);
       }
     }
   }
 
   function getShakeState() {
     return { shakeActive, leftState, coupling, leftVisible: leftAnim.visible };
+  }
+
+  /** Throw-anticipation state, for tuning/verification. */
+  function getThrowAnimState() {
+    return {
+      state: windupState,
+      amount: windupAmount,
+      intensity: windupIntensity,
+      peakSpeed: windupPeakSpeed,
+      curlAdd: windupCurlAdd,
+      leftReleasing,
+      leftOpen: leftOpenBlend,
+      rotZ: windupGroup.rotation.z,
+      rotX: windupGroup.rotation.x,
+      offsetX: windupGroup.position.x,
+      offsetY: windupGroup.position.y,
+    };
+  }
+
+  /** Release-resistance state, for tuning/verification. */
+  function getResistanceState() {
+    const active = resistDuration > 0;
+    return {
+      active,
+      elapsedMs: resistElapsed,
+      durationMs: resistDuration,
+      startStrength: resistStrength,
+      // The follow-rate multiplier being applied right now (1 = normal).
+      currentFactor: active
+        ? THREE.MathUtils.lerp(resistStrength, 1, resistanceRecovery(resistElapsed, resistDuration, resistCfg.sustainFraction))
+        : 1,
+    };
+  }
+
+  /** Live zone-scale multiplier (1 = full size), e.g. for scaling UI that tracks the hand. */
+  function getVisualScale() {
+    return zoneScaleCurrent;
+  }
+
+  /** Zone-scale state, for tuning/verification. */
+  function getZoneState() {
+    return { inOriginZone, scale: zoneScaleCurrent, targetScale: zoneScaleTo };
+  }
+
+  /** Follow-through state, for tuning/verification. */
+  function getFollowThroughState() {
+    return {
+      state: ftState,
+      amount: ftAmount,
+      targetY: ftTargetY,
+      targetX: ftTargetX,
+      rotY: followGroup.rotation.y,
+      rotX: followGroup.rotation.x,
+    };
   }
 
   return {
@@ -533,6 +975,8 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     cupRightOffset,
     config,
     tiltGroup,
+    windupGroup,
+    followGroup,
     scale,
     setVisible,
     setHeight,
@@ -547,6 +991,12 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     getVelocity,
     getPosition,
     getShakeState,
+    getThrowAnimState,
+    getFollowThroughState,
+    getResistanceState,
+    setZoneBounds,
+    getVisualScale,
+    getZoneState,
     update,
   };
 }

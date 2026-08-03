@@ -75,7 +75,21 @@ export function buildFaceFrames(geometry, verticesPerFace) {
       uv[(start + v) * 2 + 1] = 0.5 + y * scale;
     }
 
-    frames.push({ centroid, normal });
+    // Where each DISTINCT corner of this face lands inside its own 0..1 texture
+    // tile, paired with the 3D vertex it belongs to. Face-numbered dice ignore
+    // this (they only read centroid/normal); vertex-numbered dice (the D4) use
+    // it to paint a number beside each corner at exactly the right spot. Same
+    // right/up/scale basis as the UV write above, so the two can't drift.
+    const corners = unique.map((p) => {
+      const d = new THREE.Vector3().subVectors(p, centroid);
+      return {
+        position: p.clone(),
+        u: 0.5 + d.dot(right) * scale,
+        v: 0.5 + d.dot(up) * scale,
+      };
+    });
+
+    frames.push({ centroid, normal, corners });
   }
 
   geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
@@ -86,6 +100,46 @@ export function buildFaceFrames(geometry, verticesPerFace) {
   }
 
   return frames;
+}
+
+/**
+ * Vertex numbering, for dice read by which CORNER points up rather than which
+ * face lies flat (the D4's standard "read the apex" convention).
+ *
+ * Collects the polyhedron's distinct vertices from the face corners and hands
+ * each one a number 1..N. Then, for every face, records which number sits at
+ * each of its corners — a face corner simply inherits the number of the vertex
+ * it *is*.
+ *
+ * That inheritance is what enforces the rule this convention depends on: the
+ * three faces meeting at a vertex all touch that same vertex, so all three
+ * print the same digit around it. Reading the apex therefore gives the same
+ * answer from any angle, which is the whole point. It's a consequence of the
+ * data model rather than something the texture code has to remember to do.
+ *
+ * Returns:
+ *   vertices   [{ position, number }]  — the die's corners, numbered
+ *   faceLabels [[{ u, v, number }]]    — per face, a label per corner (tile UV)
+ */
+export function numbersFromVertices(frames) {
+  const vertices = [];
+  const indexOfVertex = (p) => {
+    for (let i = 0; i < vertices.length; i++) {
+      if (vertices[i].position.distanceToSquared(p) < EPSILON) return i;
+    }
+    vertices.push({ position: p.clone(), number: vertices.length + 1 });
+    return vertices.length - 1;
+  };
+
+  const faceLabels = frames.map((frame) =>
+    frame.corners.map((corner) => ({
+      u: corner.u,
+      v: corner.v,
+      number: vertices[indexOfVertex(corner.position)].number,
+    }))
+  );
+
+  return { vertices, faceLabels };
 }
 
 /** Pairs each face with its most anti-parallel (geometrically opposite) face. */

@@ -8,6 +8,26 @@ import {
   sendTestMessage,
 } from "../state/discordWebhook.js";
 
+// Module-level (not per-instance) open-state, mirroring nameGate.js's
+// isModalOpen()/subscribeModalOpen() exactly — main.js combines both to
+// decide when the native cursor should be visible and the 3D hand hidden
+// (see main.js's anyModalOpen()). createDiscordPanel() is only ever
+// instantiated once, so a singleton here costs nothing.
+let modalOpen = false;
+const openListeners = new Set();
+function setModalOpen(next) {
+  if (modalOpen === next) return;
+  modalOpen = next;
+  openListeners.forEach((callback) => callback(modalOpen));
+}
+export function isDiscordModalOpen() {
+  return modalOpen;
+}
+export function subscribeDiscordModalOpen(callback) {
+  openListeners.add(callback);
+  return () => openListeners.delete(callback);
+}
+
 /**
  * Wires the Discord webhook config modal (static markup in index.html).
  *
@@ -17,8 +37,9 @@ import {
  *
  * Opening/closing is via the corner #discord-button; the overlay is topmost so
  * it blocks the board underneath just by existing (same pattern as nameGate).
- * The native cursor is made visible inside it in CSS (cursor: auto override),
- * so on desktop we don't need to touch the 3D hand here.
+ * The native cursor being visible inside it is now handled centrally in
+ * main.js (removing body.hand-cursor-active while ANY modal is open — see
+ * that file and style.css), not by this modal's own CSS.
  */
 export function createDiscordPanel() {
   const els = {
@@ -91,10 +112,12 @@ export function createDiscordPanel() {
     clearFeedback();
     renderState();
     els.overlay.hidden = false;
+    setModalOpen(true);
     requestAnimationFrame(() => els.input.focus());
   }
   function close() {
     els.overlay.hidden = true;
+    setModalOpen(false);
   }
 
   els.button.addEventListener("click", open);

@@ -4,6 +4,11 @@ export function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+/** Zero slope at both ends: smooth accelerate-then-decelerate. */
+export function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
 /**
  * Smoothly animates an Object3D's position and rotation to a new pose.
  * Re-calling this on a target that's already mid-tween interrupts it

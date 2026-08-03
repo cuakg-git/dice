@@ -1,11 +1,12 @@
 import * as THREE from "three";
-import { createNumberAtlasTexture } from "./textureUtils.js";
+import { createNumberAtlasTexture, createCornerNumberAtlasTexture } from "./textureUtils.js";
 import { DICE_NUMBER_COLOR } from "./diceColors.js";
 import {
   buildFaceFrames,
   remapUVsToAtlas,
   pairOppositeFaces,
   numbersFromOppositeSum,
+  numbersFromVertices,
   sequentialNumbers,
 } from "./polyhedronUtils.js";
 
@@ -50,9 +51,16 @@ export function buildDieType({
 }) {
   const frames = buildFaceFrames(geometry, verticesPerFace);
   const faceCount = frames.length;
+  const isVertexNumbered = numbering === "vertex";
 
-  const numbers =
-    numbering === "sequential"
+  // Vertex-numbered dice put a number on each CORNER of each face (three per
+  // triangular face) instead of one in the middle; `numbers` (a per-face
+  // array) simply doesn't apply to them, so it stays empty and `vertices`
+  // carries the numbering instead.
+  const vertexNumbering = isVertexNumbered ? numbersFromVertices(frames) : null;
+  const numbers = isVertexNumbered
+    ? []
+    : numbering === "sequential"
       ? sequentialNumbers(faceCount)
       : numbersFromOppositeSum(pairOppositeFaces(frames), numbering.oppositeSum);
 
@@ -63,7 +71,15 @@ export function buildDieType({
   // as real contrast against it — see textureUtils.js for why that has to be
   // multiplicative (part of the same map) rather than an additive emissive
   // trick, which can only brighten a surface, never darken it.
-  const atlasTexture = createNumberAtlasTexture({ numbers, gridSize, bgColor: color, textColor, cellSize: textureCellSize });
+  const atlasTexture = isVertexNumbered
+    ? createCornerNumberAtlasTexture({
+        faceLabels: vertexNumbering.faceLabels,
+        gridSize,
+        bgColor: color,
+        textColor,
+        cellSize: textureCellSize,
+      })
+    : createNumberAtlasTexture({ numbers, gridSize, bgColor: color, textColor, cellSize: textureCellSize });
 
   geometry.computeBoundingSphere();
   const boundingRadius = geometry.boundingSphere?.radius || 1;
@@ -80,14 +96,20 @@ export function buildDieType({
     metalness: 0.05,
   });
 
-  // A single, non-random orientation used whenever a die needs to sit
-  // "tidy" (the selection tray): face "1" pointing straight up at the
-  // (zenithal) camera, no yaw — identical for every instance of the type.
-  const standardFaceIndex = numbers.indexOf(1);
-  const standardQuaternion = new THREE.Quaternion().setFromUnitVectors(
-    frames[standardFaceIndex].normal.clone().normalize(),
-    UP
-  );
+  // A single, non-random orientation used whenever a die needs to sit "tidy"
+  // (the selection tray), identical for every instance of the type. Face-
+  // numbered dice put face "1" flat on top facing the (zenithal) camera.
+  // Vertex-numbered dice instead aim vertex "1" straight up — which is both
+  // the number this convention reads AND a pose that actually rests on a
+  // face, since the opposite face ends up flat on the table.
+  const standardQuaternion = new THREE.Quaternion();
+  if (isVertexNumbered) {
+    const apex = vertexNumbering.vertices.find((v) => v.number === 1);
+    standardQuaternion.setFromUnitVectors(apex.position.clone().normalize(), UP);
+  } else {
+    const standardFaceIndex = numbers.indexOf(1);
+    standardQuaternion.setFromUnitVectors(frames[standardFaceIndex].normal.clone().normalize(), UP);
+  }
 
   return {
     geometry,
@@ -95,6 +117,10 @@ export function buildDieType({
     faceCount,
     frames,
     numbers,
+    // Only present on vertex-numbered dice: [{ position, number }] for each
+    // corner, which is what dieValue reads to find the apex. Undefined
+    // elsewhere, so a face-numbered die can never accidentally take that path.
+    vertices: vertexNumbering ? vertexNumbering.vertices : undefined,
     valueFace,
     boundingRadius,
     atlasTexture,

@@ -16,13 +16,14 @@ import { readRecordValue } from "./dice/dieValue.js";
 import { addRoll } from "./state/rollLog.js";
 import { createThrowBatcher } from "./state/throwBatches.js";
 import { createRollLogPanel } from "./ui/rollLogPanel.js";
-import { createDiscordPanel } from "./ui/discordPanel.js";
+import { createDiscordPanel, isDiscordModalOpen, subscribeDiscordModalOpen } from "./ui/discordPanel.js";
 import { isConnected, getWebhookUrl, sendWebhookPayload } from "./state/discordWebhook.js";
 import { buildRollWebhookPayload } from "./state/discordMessage.js";
 import { getBreakpoint, isTouchDevice } from "./responsive.js";
 import { createDicePhysics } from "./physics/DicePhysics.js";
 import { createHandCursor, gripCurlForDie, inradiusFraction } from "./hand/HandCursor.js";
 import { HAND_CONFIG } from "./hand/handConfig.js";
+import { createLaunchEffects } from "./effects/launchEffects.js";
 import { initNameGate, isModalOpen, subscribeModalOpen } from "./ui/nameGate.js";
 import { getStoredName, subscribeName } from "./state/userName.js";
 
@@ -31,6 +32,19 @@ import { getStoredName, subscribeName } from "./state/userName.js";
 // the "what's your name" modal immediately rather than staring at a blank
 // frame while physics loads in the background.
 initNameGate();
+
+// Same reasoning, same urgency: #app.layout-mobile is what CSS keys the
+// roll-log's desktop-fixed-column vs mobile-sidesheet split on (see
+// style.css), so it has to be correct BEFORE the browser's first paint — a
+// raw CSS media query can't reproduce getBreakpoint()'s portrait-aware
+// mobile test (a narrow but landscape window is still "desktop" here), so
+// this has to be a JS-driven class, kept in sync on every later resize too
+// (see the call inside rebuildLayout() below).
+const appEl = document.getElementById("app");
+function syncLayoutModeClass() {
+  appEl.classList.toggle("layout-mobile", getBreakpoint() === "mobile");
+}
+syncLayoutModeClass();
 
 const DIE_TYPES = [
   { name: "D4", build: createD4Type },
@@ -95,6 +109,15 @@ const BOARD_TUNING = {
     dieRadius: 0.6,
     sourceDieRadius: 0.4, // the source-strip size (also bigger; see packing note below)
     maxThrowSpeed: 18,
+    // Whole-throw inertia scale. Applied to the launch velocity AND to the cap
+    // it's clamped against (and to the flick's entry speed), so EVERY throw —
+    // gentle ones and ones already pinned at the cap alike — comes out exactly
+    // this much stronger. Scaling only the velocity would have left hard
+    // throws unchanged, since they're clamped at maxThrowSpeed anyway.
+    // Kept as its own factor instead of folding 25% into maxThrowSpeed so the
+    // original tuning stays legible and this is one number to revert.
+    // Roll spin follows for free: rollAngvel is speed * torqueFactor.
+    throwForceMultiplier: 1.25,
     torqueFactor: 1.75,
     linearDamping: 0.55,
     angularDamping: 0.95,
@@ -122,6 +145,7 @@ const BOARD_TUNING = {
     dieRadius: 0.8,
     sourceDieRadius: 0.28, // unchanged — this whole change is desktop-only
     maxThrowSpeed: 25,
+    throwForceMultiplier: 1, // desktop-only change; mobile keeps its current feel
     torqueFactor: 1.5,
     linearDamping: 0.95,
     angularDamping: 1.4,
@@ -137,6 +161,28 @@ const BOARD_TUNING = {
     flightTumbleFactor: 1.2,
   },
 };
+
+// Per-type visual size correction. Only the D4 uses this (Plan B from the
+// vertex-numbering legibility pass): even at the geometric optimum for its
+// corner-number placement, a triangular face has less usable area per digit
+// than the others — measured, its glyphs still came out smaller relative to
+// its own die than every other type's, including the 20-tiny-faces D20
+// (relative on-screen glyph size 0.57 vs D20's 0.64 and D6/D8's 0.86 — see
+// the task notes). +20% brings it above the D20 without making it
+// conspicuously the biggest die on the board. Applied uniformly wherever a
+// die's world radius is computed (dieWorldRadius below) — board, source
+// strip, hand-hold, drag ramps, hitbox — so the D4 is consistently bigger
+// everywhere rather than mismatched between contexts. Same ratio on both
+// desktop and mobile, since it's a fix for the shape itself, not a
+// platform-specific one; the other 5 types are untouched (default 1).
+const DIE_SIZE_MULTIPLIER = { D4: 1.2 };
+function sizeMultiplierFor(typeName) {
+  return DIE_SIZE_MULTIPLIER[typeName] ?? 1;
+}
+/** A die's actual world radius for `scaleForRadius`, after its type's size correction. */
+function dieWorldRadius(record, baseRadius) {
+  return baseRadius * sizeMultiplierFor(record.typeName);
+}
 
 const LABEL_HEIGHT = 0.02;
 const RETURN_DURATION_MS = 300;
@@ -219,20 +265,50 @@ scene.add(dragShadow);
 // under it; it floats above the board's ceiling so nothing can occlude it.
 const handCursor = createHandCursor({ scene });
 
-// The 3D hand hides itself while the name modal is up (and the OS cursor
-// takes over instead — see #name-modal-overlay's `cursor: auto` override in
-// style.css) so it doesn't float uselessly over the modal, then reappears
-// the moment the modal closes.
+// Comic-style throw feedback (streaks + speed lines). Pre-allocates its whole
+// mesh pool here so a throw never allocates; see launchEffects.js.
+const launchEffects = createLaunchEffects({ scene });
+
+// Both modals (name gate, Discord config) are equivalent for cursor/hand
+// purposes: whichever is open, the native OS cursor must be usable and the
+// 3D hand must get out of the way. One combined check instead of repeating
+// `isModalOpen() || isDiscordModalOpen()` at every call site.
+function anyModalOpen() {
+  return isModalOpen() || isDiscordModalOpen();
+}
+
+// The 3D hand hides itself while a modal is up (the OS cursor takes over
+// instead — see the body.hand-cursor-active handling below) so it doesn't
+// float uselessly over/behind the modal, then reappears the moment it closes.
 function updateHandCursorVisibility() {
-  handCursor.setVisible(handCursorEnabled && !isModalOpen());
+  handCursor.setVisible(handCursorEnabled && !anyModalOpen());
 }
 updateHandCursorVisibility();
 subscribeModalOpen(updateHandCursorVisibility);
+subscribeDiscordModalOpen(updateHandCursorVisibility);
 
-// On <html> itself, not just the canvas: the canvas can be smaller than its
-// container for an instant during a resize, which would otherwise expose the
-// native cursor over #viewport/#app underneath it (see style.css).
-if (handCursorEnabled) document.documentElement.classList.add("hand-cursor-mode");
+// Native-cursor visibility, on <body>, not a curated element list: see
+// style.css's `body.hand-cursor-active, body.hand-cursor-active * { cursor:
+// none !important; }`. That blanket rule is what a prior version of this
+// class (scoped to html/body/#app/#viewport/canvas/#labels only) was
+// missing — any element with its OWN `cursor` rule (a button's `cursor:
+// pointer`, say) still won on inheritance regardless of that list, and the
+// roll-log's "Limpiar" button turned out to be exactly that once the log
+// became a permanent column instead of a toggled sidesheet (diagnosed by
+// auditing every `cursor:` declaration in style.css against what's actually
+// reachable on desktop — see the task notes). Modals opt OUT by having this
+// class removed from <body> entirely while they're open, rather than each
+// modal's own CSS carving out a `cursor: auto` exception — that per-modal
+// opt-out was the same "someone has to remember" failure mode that caused
+// the bug above, just one level down, so it's gone now: no override to
+// forget, the blanket rule simply isn't in effect.
+function updateCursorClass() {
+  const active = handCursorEnabled && !anyModalOpen();
+  document.body.classList.toggle("hand-cursor-active", active);
+}
+updateCursorClass();
+subscribeModalOpen(updateCursorClass);
+subscribeDiscordModalOpen(updateCursorClass);
 
 // Some engines cache "is the native cursor hidden" per window and don't
 // re-check it just because our CSS class was never removed — they only
@@ -241,13 +317,15 @@ if (handCursorEnabled) document.documentElement.classList.add("hand-cursor-mode"
 // cursor visible again despite the class still being present. Force a
 // reflow between removing and re-adding the class so the browser is
 // guaranteed to re-evaluate it, on every "pointer (re)entered the window"
-// and "window regained focus" signal.
+// and "window regained focus" signal. This is a SEPARATE concern from the
+// coverage fix above (a browser-caching quirk, not a missing selector) —
+// belt-and-suspenders, kept from the original fix attempt since it's cheap
+// and still correct, just retargeted to the new class/element.
 function reassertHiddenCursor() {
-  if (!handCursorEnabled) return;
-  const root = document.documentElement;
-  root.classList.remove("hand-cursor-mode");
-  void root.offsetWidth; // forces a reflow between the remove/add
-  root.classList.add("hand-cursor-mode");
+  if (!handCursorEnabled || anyModalOpen()) return;
+  document.body.classList.remove("hand-cursor-active");
+  void document.body.offsetWidth; // forces a reflow between the remove/add
+  document.body.classList.add("hand-cursor-active");
 }
 
 if (handCursorEnabled) {
@@ -379,11 +457,16 @@ subscribeName((name) => {
 });
 
 function updateHandNameLabel() {
-  const visible = handCursorEnabled && !isModalOpen();
+  const visible = handCursorEnabled && !anyModalOpen();
   handNameLabelEl.hidden = !visible;
   if (!visible) return;
   const pos = handCursor.getPosition();
-  placeLabelAt(handNameLabelEl, pos.x, 0, pos.z + HAND_NAME_LABEL_OFFSET_Z);
+  // The label element's own size never changes (it's a fixed-size DOM
+  // overlay, not part of the 3D hand), but its offset scales with the hand's
+  // live zone scale so it stays tucked against the (possibly shrunk) hand
+  // instead of floating a full-size gap below a half-size hand.
+  const offsetZ = HAND_NAME_LABEL_OFFSET_Z * handCursor.getVisualScale();
+  placeLabelAt(handNameLabelEl, pos.x, 0, pos.z + offsetZ);
 }
 updateHandNameLabel(); // position it before the first paint, not just from frame 2 onward
 
@@ -467,7 +550,7 @@ function computeMobileLayout(aspect) {
 
 /** The nominal (un-hovered/un-pressed) radius a die "belongs at" right now. */
 function currentNominalRadius(record) {
-  return record.inTray ? boardTuning.dieRadius : sourceDieRadius;
+  return dieWorldRadius(record, record.inTray ? boardTuning.dieRadius : sourceDieRadius);
 }
 
 function updateHitboxSizes() {
@@ -484,7 +567,7 @@ function updateHitboxSizes() {
 
 /** Places a die at rest in a board slot, at the current breakpoint's board scale. */
 function seatDieOnBoard(record, slot) {
-  const scale = scaleForRadius(record.dieType, boardTuning.dieRadius);
+  const scale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
   const restY = computeRestY(record.dieType, record.dieType.standardQuaternion, scale);
   record.group.position.set(slot.x, restY, slot.z);
   record.group.quaternion.copy(record.dieType.standardQuaternion);
@@ -497,6 +580,12 @@ let lastBreakpoint = null;
 let lastAspect = null;
 
 function rebuildLayout() {
+  // Must happen before the clientWidth read just below: the class is what
+  // decides whether #viewport sits in the flex-row desktop stage (narrower,
+  // sharing width with the log column) or fills the mobile block layout
+  // (full width, log as an overlay on top) — read the size first and this
+  // would measure last frame's layout instead of the one about to apply.
+  syncLayoutModeClass();
   const breakpoint = getBreakpoint();
   lastBreakpoint = breakpoint;
   const aspect = viewport.clientHeight > 0 ? viewport.clientWidth / viewport.clientHeight : 1;
@@ -556,15 +645,17 @@ function rebuildLayout() {
     layout.sourceCenterZ
   );
 
-  // Packing distances scale with the live source size, so bigger desktop dice
-  // still get placed without overlap (the floor is the true no-overlap gap).
-  const minDist = sourceDieRadius * SOURCE_MIN_DISTANCE_FACTOR;
-  const zoneMargin = sourceDieRadius * SOURCE_ZONE_MARGIN_FACTOR;
-  const overlapFloor = sourceDieRadius * SOURCE_OVERLAP_FLOOR_FACTOR;
-
   DIE_TYPES.forEach(({ name }, i) => {
     const zone = zones[i];
     const sourceDice = records.filter((r) => r.typeName === name && !r.inTray);
+
+    // Packing distances scale with the live source size AND this type's own
+    // size correction, so a bigger D4 still gets placed without overlapping
+    // its neighbors in its own zone (the floor is the true no-overlap gap).
+    const typeRadius = sourceDieRadius * sizeMultiplierFor(name);
+    const minDist = typeRadius * SOURCE_MIN_DISTANCE_FACTOR;
+    const zoneMargin = typeRadius * SOURCE_ZONE_MARGIN_FACTOR;
+    const overlapFloor = typeRadius * SOURCE_OVERLAP_FLOOR_FACTOR;
     const points = samplePointsInZone(zone, sourceDice.length, minDist, zoneMargin, overlapFloor);
 
     sourceDice.forEach((record, idx) => {
@@ -572,7 +663,7 @@ function rebuildLayout() {
       // Resize to the breakpoint's source size (desktop grew; mobile unchanged)
       // unless the die is mid-drag — the drag ramp owns its scale then.
       if (!record.dragging && !record.scaleRamp) {
-        const scale = scaleForRadius(record.dieType, sourceDieRadius);
+        const scale = scaleForRadius(record.dieType, typeRadius);
         record.group.scale.setScalar(scale);
         record.restingScale = scale;
       }
@@ -612,6 +703,15 @@ function rebuildLayout() {
   // Park the hand above the board's ceiling, so no die — however hard it is
   // thrown — can ever be drawn in front of it.
   handCursor.setHeight(boardTuning.dieRadius * boardTuning.wallHeightRatio + HAND_CONFIG.cursor.heightMargin);
+
+  // Same rectangle overTray()/drop-routing already use, so the hand's "am I
+  // over the board" and a die's "which zone did I land in" always agree.
+  handCursor.setZoneBounds({
+    centerX: trayBounds.centerX,
+    centerZ: trayBounds.centerZ,
+    halfWidth: trayBounds.width / 2,
+    halfDepth: trayBounds.depth / 2,
+  });
 
   updateHitboxSizes();
   updateLabels();
@@ -659,13 +759,14 @@ function rampScale(record, toScale, duration = SCALE_TRANSITION_MS) {
 
 function returnDieToTable(record) {
   record.value = null; // back in the source strip: it isn't showing a result
-  rampScale(record, sourceDieRadius / record.dieType.boundingRadius, RETURN_DURATION_MS);
+  const targetRadius = dieWorldRadius(record, sourceDieRadius);
+  rampScale(record, targetRadius / record.dieType.boundingRadius, RETURN_DURATION_MS);
   animateTransform(record.group, {
     toPosition: record.originalPosition,
     toQuaternion: record.originalQuaternion,
     duration: RETURN_DURATION_MS,
     onComplete: () => {
-      record.restingScale = scaleForRadius(record.dieType, sourceDieRadius);
+      record.restingScale = scaleForRadius(record.dieType, targetRadius);
       updateHitboxSizes();
     },
   });
@@ -738,19 +839,23 @@ function throwDieIntoTray(record, dropX, dropZ, velX, velZ) {
   const x = THREE.MathUtils.clamp(dropX, b.xMin, b.xMax);
   const z = THREE.MathUtils.clamp(dropZ, b.zMin, b.zMax);
 
-  let speed = Math.hypot(velX, velZ);
-  let vx = velX;
-  let vz = velZ;
-  if (speed > boardTuning.maxThrowSpeed) {
-    const k = boardTuning.maxThrowSpeed / speed;
+  // Same gesture, `throwForceMultiplier` times the inertia — the multiplier
+  // scales the launch velocity and the cap together (see BOARD_TUNING).
+  const force = boardTuning.throwForceMultiplier;
+  const maxSpeed = boardTuning.maxThrowSpeed * force;
+  let speed = Math.hypot(velX, velZ) * force;
+  let vx = velX * force;
+  let vz = velZ * force;
+  if (speed > maxSpeed) {
+    const k = maxSpeed / speed;
     vx *= k;
     vz *= k;
-    speed = boardTuning.maxThrowSpeed;
+    speed = maxSpeed;
   }
 
   const angvel = rollAngvel(vx, vz, speed, boardTuning.torqueFactor);
 
-  const scale = scaleForRadius(record.dieType, boardTuning.dieRadius);
+  const scale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
   record.group.scale.setScalar(scale);
   record.restingScale = scale;
   record.scaleRamp = null;
@@ -800,19 +905,23 @@ function computeFlickEntry(releaseX, releaseZ, velX, velZ, speed) {
     0,
     1
   );
-  const inwardSpeed = THREE.MathUtils.lerp(boardTuning.flickMinInwardSpeed, boardTuning.maxThrowSpeed, forceFrac);
-  const cap = boardTuning.maxThrowSpeed;
+  // Same throwForceMultiplier as the in-board throw, so a flick gains exactly
+  // the same 25% and the two entry paths stay consistent with each other.
+  const force = boardTuning.throwForceMultiplier;
+  const inwardSpeed =
+    THREE.MathUtils.lerp(boardTuning.flickMinInwardSpeed, boardTuning.maxThrowSpeed, forceFrac) * force;
+  const cap = boardTuning.maxThrowSpeed * force;
 
   let entryVx;
   let entryVz;
   if (maxOver === overTop || maxOver === overBottom) {
     // Entered through top/bottom: inward runs along Z, lateral is the gesture's X.
     entryVz = maxOver === overTop ? inwardSpeed : -inwardSpeed;
-    entryVx = THREE.MathUtils.clamp(velX * boardTuning.aimLateralFactor, -cap, cap);
+    entryVx = THREE.MathUtils.clamp(velX * force * boardTuning.aimLateralFactor, -cap, cap);
   } else {
     // Entered through left/right: inward runs along X, lateral is the gesture's Z.
     entryVx = maxOver === overLeft ? inwardSpeed : -inwardSpeed;
-    entryVz = THREE.MathUtils.clamp(velZ * boardTuning.aimLateralFactor, -cap, cap);
+    entryVz = THREE.MathUtils.clamp(velZ * force * boardTuning.aimLateralFactor, -cap, cap);
   }
 
   const T = boardTuning.flightTime;
@@ -836,7 +945,7 @@ function flickDieIntoBoard(record, releaseX, releaseZ, velX, velZ, speed) {
 
   // Lock to board scale now so the collider built at handoff matches the
   // rendered size exactly (the drag ramp is usually already done anyway).
-  const scale = scaleForRadius(record.dieType, boardTuning.dieRadius);
+  const scale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
   record.group.scale.setScalar(scale);
   record.restingScale = scale;
   record.scaleRamp = null;
@@ -976,7 +1085,7 @@ function addDieToHand(record) {
   // Marks it in-transit; also drops it from the ordered board selection.
   addHeldDie(record.id, record.typeName);
 
-  const dieScale = scaleForRadius(record.dieType, boardTuning.dieRadius);
+  const dieScale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
   record.restingScale = dieScale;
   handCursor.hold(record, {
     dieWorldScale: dieScale,
@@ -1039,6 +1148,12 @@ function throwAllHeld() {
     routeReleasedDie(record, baseX, baseZ, v.x, v.z, false);
   }
   endThrow();
+  // Purely decorative, and fired AFTER every die is already routed into
+  // physics — it can't delay or alter the throw. Only the dice that actually
+  // went into play get a streak (one sent home wasn't thrown).
+  if (handCursorEnabled) {
+    launchEffects.launch(released.filter((r) => r.inTray || r.flying), velocity.x, velocity.z);
+  }
 }
 
 /** Drops the whole handful dead (click on empty): destination by position, no throw velocity. */
@@ -1138,7 +1253,7 @@ setupInteraction({
   onDragStart: (record) => {
     record.dragging = true;
     cancelTween(record.group);
-    rampScale(record, scaleForRadius(record.dieType, boardTuning.dieRadius));
+    rampScale(record, scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius)));
     dragShadow.visible = true;
   },
   onDragMove: (record, x, z) => {
@@ -1242,6 +1357,8 @@ onFrame((time) => {
   updateTweens();
   handCursor.update(dt, time / 1000);
   updateHandNameLabel();
+  // After physics.sync above, so trails read this frame's die positions.
+  launchEffects.update(dt);
 });
 
 start();

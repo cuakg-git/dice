@@ -20,6 +20,20 @@ body {
   overscroll-behavior: none;
 }
 
+/* Desktop (default): #app is a flex ROW — #stage (the 3D scene + its
+   overlays) and #roll-log sit side by side as two real columns, left to
+   right, each taking actual layout width. Narrowing #stage this way is what
+   makes the board's WORLD-SPACE size shrink too: main.js's rebuildLayout()
+   derives the board's world width from #viewport's live pixel aspect ratio,
+   so a #stage that's narrower in CSS produces a narrower board and
+   correspondingly resized physics walls — no coordinate-math duplicated
+   here, this is purely "give the log real width, let the existing
+   aspect-driven layout react."
+   Mobile (.layout-mobile, toggled by main.js to match the exact same
+   getBreakpoint() the rest of the app already uses — a plain CSS width media
+   query can't reproduce its portrait-aware logic): reverts to a plain block
+   container, exactly the old behavior, so #roll-log can go back to being an
+   absolute overlay ON TOP of #stage instead of a column beside it. */
 #app {
   position: relative;
   /* 100% (not 100vw) so a scrollbar can never add horizontal overflow. */
@@ -33,9 +47,34 @@ body {
   overflow: hidden;
   touch-action: none;
   overscroll-behavior: none;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
 }
 
-/* The canvas must cover the FULL viewport — no padding, border or margin
+#app.layout-mobile {
+  display: block;
+}
+
+/* Everything anchored to the 3D scene (canvas + its HTML overlays). Its own
+   `position: relative` is the positioning context for #labels/#corner-
+   controls/#hand-widget (all `position: absolute`) — identical to how they
+   were anchored directly to #app before this wrapper existed, just scoped to
+   the narrower stage box now instead of the full #app width on desktop.
+   `min-width: 0` is required for a flex item to actually shrink below its
+   content's natural size (the flexbox default is `min-width: auto`, which
+   would otherwise refuse to let #stage go narrower than #viewport's
+   intrinsic size and silently defeat the whole "board shrinks for the log
+   column" mechanism). */
+#stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The canvas must cover the FULL stage — no padding, border or margin
    anywhere in this chain (safe-area padding here used to shrink the canvas
    and leave background bands around it). */
 #viewport {
@@ -51,21 +90,25 @@ body {
   touch-action: none;
 }
 
-/* Pointer devices: the 3D hand IS the cursor, so hide the native one.
-   The class lives on <html> (not just #app): the canvas can momentarily be
-   smaller than its container (mid-resize, before the ResizeObserver settles
-   its size), which would otherwise let the pointer land on #viewport/#app
-   underneath — with the native cursor showing there the instant that
-   happens. html/body are listed explicitly too (belt and suspenders on top
-   of inheritance) so there is no element anywhere in the chain the pointer
-   could resolve to, on window entry/exit, that lacks its own `cursor: none`. */
-html.hand-cursor-mode,
-html.hand-cursor-mode body,
-html.hand-cursor-mode #app,
-html.hand-cursor-mode #viewport,
-html.hand-cursor-mode #viewport canvas,
-html.hand-cursor-mode #labels {
-  cursor: none;
+/* Pointer devices: the 3D hand IS the cursor, so hide the native one —
+   EVERYWHERE, via `*`, not a curated list of elements. A curated list
+   (html/body/#app/#viewport/canvas/#labels only) is exactly how this broke
+   before: the roll-log's "Limpiar" button has its own `cursor: pointer`,
+   and once the log became a permanent desktop column instead of a toggled
+   sidesheet, the mouse started crossing it constantly (it sits right at the
+   screen's right edge, a common re-entry point) — nobody had added it to
+   the list, so the OS cursor showed there. That's a whole CLASS of bug
+   (every future button needs someone to remember to add it here); `*` with
+   `!important` closes it structurally instead: `!important` is deliberate
+   and necessary — `*` alone has ~zero specificity and would lose to any
+   ordinary `#id { cursor: pointer }` rule, including ones not written yet.
+   Modals opt OUT by having .hand-cursor-active removed from <body> entirely
+   while they're open (see main.js's anyModalOpen()/updateCursorClass()) —
+   turning "cursor visible in a modal" into the ABSENCE of this rule, not a
+   per-modal override to remember. */
+body.hand-cursor-active,
+body.hand-cursor-active * {
+  cursor: none !important;
 }
 
 #labels {
@@ -74,39 +117,53 @@ html.hand-cursor-mode #labels {
   pointer-events: none;
 }
 
-/* Roll log — a right-side SIDESHEET. It's an absolute overlay pinned to the
-   right edge, full height, that slides in/out via `transform` (so it never
-   changes the layout box of #viewport underneath — the 3D scene and physics
-   are untouched whether it's open or closed). Closed = translated fully off
-   the right edge; #roll-log.is-open brings it to rest at x=0. */
+/* Roll log — DESKTOP (default/base): a real flex column, always visible,
+   full height, sitting beside #stage (not over it). No transform/slide, no
+   drop shadow (nothing floats above anything else here), no z-index game —
+   it's just a normal document-flow sibling now. `flex: 0 0 <width>` is a
+   fixed basis that neither grows nor shrinks, so #stage (flex: 1 1 auto)
+   absorbs 100% of whatever width is left. */
 #roll-log {
+  position: relative;
+  flex: 0 0 300px;
+  width: 300px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.92);
+  border-left: 1px solid rgba(91, 100, 114, 0.18);
+  font-size: 12px;
+  color: #3d444f;
+}
+
+/* Mobile — the ORIGINAL sidesheet behavior, unchanged: an absolute overlay
+   pinned to the right edge of #stage (its nearest positioned ancestor),
+   sliding in/out via `transform` so it never resizes #stage or the physics
+   board underneath. Closed = translated fully off the right edge;
+   #roll-log.is-open brings it to rest at x=0. */
+#app.layout-mobile #roll-log {
   position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
   z-index: 30;
+  flex-basis: auto;
   width: 300px;
   max-width: 88vw;
-  display: flex;
-  flex-direction: column;
-  background: rgba(255, 255, 255, 0.92);
-  border-left: 1px solid rgba(91, 100, 114, 0.18);
   box-shadow: -4px 0 18px rgba(28, 34, 43, 0.14);
   backdrop-filter: blur(8px);
-  font-size: 12px;
-  color: #3d444f;
   transform: translateX(100%);
   transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
 
-#roll-log.is-open {
+#app.layout-mobile #roll-log.is-open {
   transform: translateX(0);
 }
 
 /* Respect users who ask for reduced motion — appear/disappear with no slide. */
 @media (prefers-reduced-motion: reduce) {
-  #roll-log {
+  #app.layout-mobile #roll-log {
     transition: none;
   }
 }
@@ -146,7 +203,11 @@ html.hand-cursor-mode #labels {
   color: #5b6472;
 }
 
+/* Desktop: the panel is always visible, so a "close" affordance would be
+   misleading (there's nothing to close it TO) — hidden there, restored on
+   mobile where the sidesheet is genuinely dismissible. */
 #roll-log-close {
+  display: none;
   border: 0;
   background: transparent;
   color: #99a2af;
@@ -156,12 +217,22 @@ html.hand-cursor-mode #labels {
   border-radius: 5px;
   cursor: pointer;
 }
+#app.layout-mobile #roll-log-close {
+  display: inline-flex;
+}
 #roll-log-close:hover {
   background: rgba(91, 100, 114, 0.12);
   color: #5b6472;
 }
 
-/* The scrollable part; the list itself is the only thing that overflows. */
+/* The scrollable part; the list itself is the only thing that overflows.
+   Native scrollbar chrome is hidden (scrolling itself still works fine via
+   wheel/trackpad/touch): a browser-drawn scrollbar track/thumb is OS UI, not
+   page content, so `cursor: none` on the list can never reach it — hovering
+   directly over that strip would always show the native arrow no matter what
+   `cursor` rule is set, `body.hand-cursor-active` or not. Hidden
+   unconditionally (not just while hand-cursor-active) since it's a cosmetic,
+   harmless choice either way. */
 #roll-log-list {
   margin: 0;
   padding: 8px;
@@ -170,6 +241,11 @@ html.hand-cursor-mode #labels {
   overscroll-behavior: contain; /* don't chain scroll to the page/board */
   -webkit-overflow-scrolling: touch;
   flex: 1;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge */
+}
+#roll-log-list::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/new Edge (Blink/WebKit) */
 }
 
 #roll-log-empty {
@@ -280,11 +356,22 @@ html.hand-cursor-mode #labels {
   align-items: center;
 }
 
-#roll-log-toggle,
-#corner-controls #discord-button {
+/* Desktop: no open/close concept (the panel is always visible), so the
+   toggle button is dropped from the layout entirely — not just visually
+   hidden-but-present, since #corner-controls is a flex row and a hidden-but-
+   space-taking button would misalign the Discord button next to it. Mobile
+   restores it exactly as before. */
+#roll-log-toggle {
+  display: none;
+}
+#app.layout-mobile #roll-log-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+#roll-log-toggle,
+#corner-controls #discord-button {
   border: 1px solid rgba(91, 100, 114, 0.18);
   border-radius: 8px;
   padding: 6px 11px;
@@ -295,6 +382,12 @@ html.hand-cursor-mode #labels {
   font-size: 12px;
   font-weight: 600;
   color: #4a5563;
+}
+
+#corner-controls #discord-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .corner-btn__icon {
@@ -309,22 +402,26 @@ html.hand-cursor-mode #labels {
   background: rgba(61, 90, 241, 0.08);
 }
 
+/* These are all mobile-only concerns (the sidesheet's own narrow-screen
+   sizing) — scoped under .layout-mobile so a merely-narrow LANDSCAPE desktop
+   window (still "desktop" per getBreakpoint(), which is orientation-aware)
+   can't have them leak in and shrink the fixed log column unexpectedly. */
+#app.layout-mobile #roll-log {
+  width: 280px;
+}
 @media (max-width: 768px) {
-  #roll-log {
-    width: 280px;
-  }
-  #corner-controls {
+  #app.layout-mobile #corner-controls {
     top: 8px;
     right: 8px;
     gap: 6px;
   }
-  #roll-log-toggle,
-  #corner-controls #discord-button {
+  #app.layout-mobile #roll-log-toggle,
+  #app.layout-mobile #corner-controls #discord-button {
     padding: 5px 9px;
     font-size: 11px;
   }
   /* On the narrowest screens, drop the toggle's text label to save room. */
-  #roll-log-toggle .corner-btn__label {
+  #app.layout-mobile #roll-log-toggle .corner-btn__label {
     display: none;
   }
 }
@@ -342,21 +439,11 @@ html.hand-cursor-mode #labels {
   align-items: center;
   justify-content: center;
   background: rgba(28, 34, 43, 0.45);
-  /* Desktop hides the native cursor app-wide via `cursor: none` on
-     html.hand-cursor-mode (see below) — that's an inherited property, so
-     without this override the modal would inherit "none" too and the user
-     couldn't see where they're clicking/typing. `auto` (not `default`)
-     deliberately: it lets each element pick its own normal cursor (I-beam
-     over the input, pointer over the button) instead of forcing one look
-     everywhere. Applied to every descendant, not just the overlay itself,
-     since `cursor` only inherits where nothing more specific overrides it —
-     an inherited "none" from the html class is exactly that kind of
-     override this needs to beat on each element individually. */
-  cursor: auto;
-}
-
-#name-modal-overlay * {
-  cursor: auto;
+  /* No `cursor: auto` override needed here: main.js removes
+     body.hand-cursor-active from <body> entirely while this modal is open,
+     so the blanket `cursor: none !important` rule simply isn't in effect —
+     every element here (including inputs/buttons) falls back to its own
+     normal cursor with nothing to override. */
 }
 
 #name-modal-overlay[hidden] {
@@ -471,10 +558,10 @@ html.hand-cursor-mode #labels {
 }
 
 /* The modal overlay: fixed, topmost (above the roll log/hand-widget), blocks
-   the board underneath just by being the frontmost element. `cursor: auto` on
-   it + descendants beats the app-wide `cursor: none` (html.hand-cursor-mode)
-   so the native cursor is usable for reading/typing, exactly like the name
-   modal. */
+   the board underneath just by being the frontmost element. No `cursor: auto`
+   override needed (see the name modal's identical note above) — main.js
+   removes body.hand-cursor-active while this modal is open, so there's
+   nothing to beat. */
 #discord-modal-overlay {
   position: fixed;
   inset: 0;
@@ -484,10 +571,6 @@ html.hand-cursor-mode #labels {
   justify-content: center;
   padding: 16px;
   background: rgba(28, 34, 43, 0.45);
-  cursor: auto;
-}
-#discord-modal-overlay * {
-  cursor: auto;
 }
 #discord-modal-overlay[hidden] {
   display: none;

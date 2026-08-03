@@ -7,53 +7,76 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <title>Mesa de Dados 3D</title>
+    <!-- Favicon: the D4 icon, pre-resized (not just scaled at runtime) so it
+         reads crisply at tab size — see src/assets/favicon/ (generated from
+         src/assets/d4.png). Vite treats these href paths as asset references
+         from index.html, so they get fingerprinted/copied into dist/ on
+         build exactly like the JS-imported dice PNGs already are. -->
+    <link rel="icon" type="image/png" sizes="16x16" href="/src/assets/favicon/favicon-16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/src/assets/favicon/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/src/assets/favicon/favicon-48.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/src/assets/favicon/apple-touch-icon.png" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- #app is the flex row (desktop) / plain block (mobile, via the
+         .layout-mobile class main.js sets — see style.css and the JS layout
+         notes there): #stage is everything anchored to the 3D scene area
+         (canvas + its HTML overlays); #roll-log is a separate flex sibling on
+         desktop, or an absolutely-positioned overlay OVER #stage on mobile.
+         Splitting these into two containers is what lets the log become a
+         real column that steals width from the board on desktop while
+         staying exactly the old sliding overlay on mobile — same markup,
+         different CSS per breakpoint, no JS duplication. -->
     <div id="app">
-      <div id="viewport"></div>
-      <div id="labels"></div>
-      <!-- Roll log: a right-side sidesheet that SLIDES in over the scene (its
-           transform is off-screen by default; #roll-log.is-open brings it in).
-           It's an absolute overlay, so opening/closing it never resizes or
-           reframes the 3D viewport underneath — the physics is untouched. -->
-      <aside id="roll-log" aria-label="Historial de tiradas">
+      <div id="stage">
+        <div id="viewport"></div>
+        <div id="labels"></div>
+        <!-- Corner controls (top-right of the STAGE, i.e. right at the
+             board's edge — never under the log column on desktop, since the
+             log has its own space now). The log toggle only matters on
+             mobile (see style.css); it's hidden entirely on desktop. -->
+        <div id="corner-controls">
+          <button
+            id="roll-log-toggle"
+            type="button"
+            aria-controls="roll-log"
+            aria-expanded="false"
+            aria-label="Ver historial de rolls"
+            title="Historial de rolls"
+          >
+            <span class="corner-btn__icon" aria-hidden="true">☰</span>
+            <span class="corner-btn__label">Rolls</span>
+          </button>
+          <!-- Discreet entry point to the Discord config. Its label/✓ reflects the
+               connection state — see discordPanel.js. -->
+          <button id="discord-button" type="button" aria-haspopup="dialog" title="Enviar tus tiradas a Discord">
+            <span id="discord-button-label">Discord</span>
+          </button>
+        </div>
+        <div id="hand-widget">
+          <div id="hand-canvas"></div>
+          <div id="hand-name-label-mobile" class="hand-name-label-mobile" title="Cambiar nombre"></div>
+          <div class="hand-controls">
+            <label>Y <input id="hand-rot-y" type="range" min="0" max="360" step="1" value="0" /></label>
+            <label>X <input id="hand-rot-x" type="range" min="0" max="360" step="1" value="0" /></label>
+          </div>
+        </div>
+      </div>
+      <!-- Roll log. Desktop: an always-visible fixed column, flex sibling of
+           #stage (see style.css — no transform/overlay at all in this mode).
+           Mobile: unchanged from before — a sidesheet that SLIDES in over the
+           scene via `transform` (#roll-log.is-open), never resizing #stage or
+           the physics board underneath. -->
+      <aside id="roll-log" aria-label="Historial de rolls">
         <div id="roll-log-head">
-          <span id="roll-log-title">Tiradas</span>
+          <span id="roll-log-title">Rolls</span>
           <button id="roll-log-clear" type="button" title="Limpiar historial" aria-label="Limpiar historial">Limpiar</button>
           <button id="roll-log-close" type="button" title="Cerrar" aria-label="Cerrar historial">✕</button>
         </div>
         <ol id="roll-log-list"></ol>
         <p id="roll-log-empty">Todavía no tiraste ningún dado.</p>
       </aside>
-      <!-- Corner controls (top-right), grouped so they never overlap: the log
-           toggle sits next to the Discord button. -->
-      <div id="corner-controls">
-        <button
-          id="roll-log-toggle"
-          type="button"
-          aria-controls="roll-log"
-          aria-expanded="false"
-          aria-label="Ver historial de tiradas"
-          title="Historial de tiradas"
-        >
-          <span class="corner-btn__icon" aria-hidden="true">☰</span>
-          <span class="corner-btn__label">Tiradas</span>
-        </button>
-        <!-- Discreet entry point to the Discord config. Its label/✓ reflects the
-             connection state — see discordPanel.js. -->
-        <button id="discord-button" type="button" aria-haspopup="dialog" title="Enviar tus tiradas a Discord">
-          <span id="discord-button-label">Discord</span>
-        </button>
-      </div>
-      <div id="hand-widget">
-        <div id="hand-canvas"></div>
-        <div id="hand-name-label-mobile" class="hand-name-label-mobile" title="Cambiar nombre"></div>
-        <div class="hand-controls">
-          <label>Y <input id="hand-rot-y" type="range" min="0" max="360" step="1" value="0" /></label>
-          <label>X <input id="hand-rot-x" type="range" min="0" max="360" step="1" value="0" /></label>
-        </div>
-      </div>
     </div>
     <!-- Discord webhook config: a fixed sibling of #app so it overlays the whole
          viewport and blocks the board underneath just by being topmost (same

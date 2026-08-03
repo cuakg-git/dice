@@ -12,11 +12,12 @@ import { getStoredName, setStoredName, isValidName } from "../state/userName.js"
  * intercepts every click/tap before it can reach the canvas underneath —
  * no separate "is the app blocked" flag needed anywhere else.
  *
- * The native cursor reappearing over the modal is likewise handled entirely
- * in CSS (`#name-modal-overlay` and its children force `cursor: auto`,
- * overriding the `cursor: none` the rest of the page gets from
- * `html.hand-cursor-mode`) — this module only needs to hide the 3D hand
- * itself, which main.js does by reacting to subscribeModalOpen().
+ * The native cursor reappearing over the modal is handled in main.js: it
+ * removes `body.hand-cursor-active` entirely while any modal (this one or
+ * the Discord config) is open, so the app-wide `cursor: none !important`
+ * rule (see style.css) simply isn't in effect — this module only needs to
+ * expose isModalOpen()/subscribeModalOpen() and hide the 3D hand itself,
+ * which main.js does by reacting to those.
  */
 
 let wired = false;

@@ -95,6 +95,167 @@ export const HAND_CONFIG = {
       velScatterFrac: 0.3, // random velocity added per die, as a fraction of the hand's release speed
       velScatterMin: 2.0, // ...but at least this many world u/s, so even a gentle throw fans out
     },
+
+    // Throw ANTICIPATION (animation principle: anticipation -> action ->
+    // reaction). The action/reaction halves already exist in physics; this is
+    // the wind-up that precedes them.
+    //
+    // TIMING CONTRACT — the whole point: every millisecond of this plays
+    // DURING the user's gesture, never after the release. releaseAll() is
+    // synchronous and hands the dice back the same frame it's called, so
+    // nothing here can gate it; the wind-up state just decays afterwards as
+    // follow-through. See HandCursor.js's throw-anim state machine.
+    //
+    // The two velocity anchors below are deliberately the SAME numbers the
+    // throw physics already keys on (BOARD_TUNING.desktop in main.js:
+    // flickSpeedThreshold 6, flickSpeedForMaxForce 26). So the hand starts
+    // charging exactly when the gesture becomes fast enough to count as a
+    // throw, and reads fully charged exactly when the gesture is already
+    // producing maximum throw force — the visual and the mechanic agree
+    // instead of drifting apart.
+    throwAnim: {
+      intentVelocity: 6, // world u/s: hand is holding + moving this fast => start charging
+      fullVelocity: 26, // world u/s at which the wind-up reads at full strength (capped there)
+
+      // The wind-up needs its OWN velocity estimate rather than borrowing the
+      // tilt's: tilt.tiltSmoothing (9/s) has a ~111ms time constant, which is
+      // the whole length of the charge ramp — by the time the ramp finished,
+      // that estimate had only caught ~2/3 of the real gesture speed, so hard
+      // throws under-read and never qualified for the micro-hold. 25/s (~40ms)
+      // settles well inside the ramp while still filtering per-frame jitter.
+      velocitySmoothing: 25, // 1/s, EMA rate for the throw-gesture speed
+
+      windupDurationMs: 120, // charge ramp (fast: it has to land inside a flick)
+      recoverDurationMs: 200, // ramp back down (slowing without releasing, and follow-through after a throw)
+
+      maxAngleDeg: 20, // peak cock-back rotation, opposite the gesture direction
+      backDistance: 0.3, // peak recoil translation, in rig units (x0.75 cursor scale => ~0.22 world)
+      extraCurl: 0.18, // fingers clamp down this much harder at full charge
+      scaleContraction: 0.96, // the hand "gathers itself" slightly (1 = no contraction)
+
+      // Micro-hold ("moving hold") at the top of the charge: the pose nearly
+      // freezes for a beat, which is what makes the release read as powerful.
+      // Only for genuinely hard throws — a gentle toss skips it entirely so
+      // it never feels like the hand is hesitating.
+      holdDurationMs: 80,
+      holdMinVelocity: 16, // world u/s: below this, no hold at all
+      holdMicroAmp: 0.006, // radians of jitter during the freeze, so it isn't dead
+
+      // The left ("batting") hand opening and getting out of the way as the
+      // dice leave — turns the shake into part of the throw instead of a
+      // disconnected gesture.
+      leftReleaseDurationMs: 150,
+      leftReleaseOpenCurl: 0.05, // fingers splay to nearly flat as it lets go
+      leftReleaseOffset: { x: -0.5, y: -0.9, z: -0.4 }, // extra shove down/out, on top of the normal exit
+    },
+
+    // FOLLOW-THROUGH: the reaction half of anticipation -> action -> reaction.
+    // On release the right hand keeps rotating in the direction the throw
+    // went, mimicking a real right hand's forearm rotation over a table.
+    //
+    // The rig's longitudinal (wrist->fingertip) axis is local +Y, so
+    // supination/pronation is literally a rotation about local Y — the same
+    // axis a real forearm rotates about. At rest the palm faces DOWN (world
+    // -Y, measured: palm normal ~(-0.29, -0.91, -0.29)), i.e. we see the back
+    // of the hand.
+    //
+    // The two Y magnitudes are deliberately ASYMMETRIC, which is the whole
+    // reason a single max angle wouldn't work: rotating far enough in EITHER
+    // direction eventually shows the palm, so a symmetric max would make left
+    // and right throws look the same. A real right hand also has asymmetric
+    // range here — from palm-down, supinating ~160 deg turns the palm fully
+    // up, while pronating only has ~70 deg before the wrist stops, leaving the
+    // palm hidden. That asymmetry IS the left/right read.
+    followThrough: {
+      supinationDeg: 160, // throw LEFT: forearm supinates, palm ends up (interior visible)
+      pronationDeg: 70, // throw RIGHT: forearm pronates, palm stays hidden (back visible)
+      maxRotationXDeg: 55, // up/down component: hand tips to follow the gesture
+
+      minSpeed: 6, // below this it's a deposit, not a throw => no follow-through at all
+      fullSpeed: 26, // rotation reaches full magnitude here (same anchors as the wind-up)
+
+      durationMs: 250, // rotate out (easeOutCubic: fast start, decelerating)
+      holdDurationMs: 180, // sit at the peak pose before unwinding
+      returnDurationMs: 420, // period of the damped settle back to rest
+      returnDamping: 0.6, // <1 = slightly underdamped, so it settles instead of snapping back
+
+      // The camera is top-down, so which way a roll "reads" can invert
+      // depending on the angle — flip these if the sense looks backwards.
+      invertX: false,
+      invertY: false,
+    },
+
+    // RELEASE RESISTANCE: right after a real throw the hand briefly stops
+    // chasing the pointer at full speed, so it can't sail past the die it
+    // just launched — a real hand decelerates while the object flies on.
+    //
+    // Implemented by scaling `followLerpPerSecond` down for a moment and
+    // easing it back, NOT by freezing or queueing input: the target still
+    // updates every frame, the hand just closes the gap more slowly, so
+    // nothing is ever "swallowed" and there's no latency anywhere.
+    //
+    // Kept deliberately SHORT. A long window doesn't read as weight, it
+    // reads as the app having hung — the hand must never feel disconnected
+    // from the mouse. It also aborts the instant a die is grabbed.
+    //
+    // RECOVERY SHAPE — a plain easeOutCubic (front-loaded: most recovery in
+    // the first third) was tried first and measured fine on paper but read
+    // as nothing in practice: by the time the eye registers the throw, the
+    // hand had already re-attached. Fixed by holding flat at full resistance
+    // for `sustainFraction` of the window, THEN easing back over what's
+    // left — easeInOutCubic for that portion, so the join at the end of the
+    // plateau has zero slope on both sides (no kink) and the return itself
+    // still decelerates into normal tracking instead of snapping onto it.
+    // `sustainFraction` is exposed here specifically so this shape can be
+    // retuned by eye without touching code — 0 degenerates to a pure ease
+    // across the whole window, closer to 1 makes the release read as a
+    // held pause that then snaps back.
+    releaseResistance: {
+      enabled: true,
+      durationMs: 1100, // whole window, from fully damped back to fully responsive
+      // Follow rate is multiplied by this for the sustained portion of the
+      // window (0.08 => ~1/12 the usual responsiveness) and eases back to 1
+      // over the rest.
+      strength: 0.08,
+      // Fraction of the window held flat at `strength` before recovery
+      // starts (see RECOVERY SHAPE above).
+      sustainFraction: 0.55,
+      // Scale the effect by throw force, so a gentle lob barely drags and a
+      // hard fling drags properly. Uses the same speed anchors as the
+      // follow-through, so the two beats always agree about how hard the
+      // throw was.
+      scalesWithForce: true,
+      minSpeed: 6, // below this it's a deposit: no resistance at all
+      fullSpeed: 26, // at/above this the resistance is applied in full
+      // With scalesWithForce, a minimum-force throw still gets this fraction
+      // of the window, so the transition from "no effect" to "effect" isn't a
+      // hard step right at the threshold.
+      minForceFraction: 0.35,
+    },
+
+    // ZONE SCALE: the hand shrinks while it's over the source strip (the six
+    // crowded die groupings) so it doesn't block the view of the pile or hurt
+    // grab precision, and returns to full size over the throw board.
+    //
+    // Purely visual — a multiplier on the pivot's own scale, applied in
+    // HandCursor.js's update(). It never touches hit-testing: die hitboxes
+    // are sized independently in main.js from the board/source die radii, so
+    // a smaller hand still grabs exactly where it visually appears to.
+    //
+    // Zone membership is checked against the hand's OWN rendered position,
+    // not the raw pointer — otherwise, during a release-resistance drag, the
+    // hand could still be shrinking/growing to match a pointer position it
+    // hasn't visually reached yet, which would desync the size change from
+    // where the hand actually looks like it's standing.
+    zoneScale: {
+      originZoneHandScale: 0.5, // scale while over the source strip
+      handScaleTransitionDuration: 180, // ms, eased (easeOutCubic)
+      // World units of dead zone straddling the board edge: the hand must
+      // move this far past the boundary (in either direction) before the
+      // OTHER size is triggered, so resting right on the seam can't flicker
+      // between sizes.
+      zoneHysteresisMargin: 0.5,
+    },
   },
 
   // Desktop-only two-hand "dice cup" formed while the player shakes a held
