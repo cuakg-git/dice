@@ -275,6 +275,47 @@ export const HAND_CONFIG = {
       transitionDuration: 100, // ms, eased (easeOutCubic)
       hiddenScale: 0.001,
     },
+
+    // ANCHORED MODE (touch). The same rig, but with no pointer to chase: the
+    // hand parks at a fixed anchor and dice travel TO it. A finger drag moves
+    // it (that's the throw gesture), and letting go eases it back.
+    //
+    // Nothing else in the rig needed porting for this: tilt, wind-up,
+    // micro-hold, shake/left-hand, follow-through and the release velocity all
+    // read `pivot.position` deltas per frame, so they behave identically
+    // whether the pivot is being moved by a cursor or by a finger.
+    anchored: {
+      // Where the hand parks, as a fraction of the board's half-depth from the
+      // board centre (+ = toward the bottom edge). Bottom-centre is
+      // thumb-reachable, sits clear of the top source strip, and dice thrown
+      // "up" the board roll away from the hand instead of under it.
+      anchorZFraction: 0.82,
+      // Eases back to the anchor once the finger lets go. Deliberately slower
+      // than the drag-follow rate so the return reads as a settle rather than
+      // a snap — and this is the rate the release-resistance window damps,
+      // which is how "the hand spends itself after throwing" is expressed
+      // here instead of as resistance against chasing a pointer.
+      returnLerpPerSecond: 6,
+      // Minimum radius for grabbing the hand, in CSS px, converted to world
+      // units against the live camera. 44px is the accessibility floor for a
+      // touch target's full size; this is the RADIUS, so the grab area is
+      // comfortably above it even when the hand renders smaller.
+      touchRadiusPx: 52,
+      // Tap-to-hand flight: the die leaves physics and arcs into the palm.
+      travelDurationMs: 360,
+      travelArcHeight: 2.4, // world units of bulge at the midpoint of the arc
+    },
+
+    // PLATFORM OVERRIDES: only values that genuinely must differ on touch.
+    // Shallow-merged over everything above by createHandCursor({ platform }),
+    // so all the animation logic and its tuning stay single-sourced.
+    mobile: {
+      // The hand is a touch TARGET here, not a cursor, so it reads bigger:
+      // scaled for mobile's 16.5-unit-wide world and its larger dice
+      // (0.8 radius vs desktop's 0.6).
+      baseWorldScale: 1.0,
+      scaleReduction: 1.3,
+    },
   },
 
   // Desktop-only two-hand "dice cup" formed while the player shakes a held

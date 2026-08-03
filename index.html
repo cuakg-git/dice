@@ -60,13 +60,14 @@
             <span id="discord-button-label">Discord</span>
           </button>
         </div>
+        <!-- Mobile name chip. This used to also host a whole second WebGL
+             canvas rendering a decorative hand, plus two rotation sliders.
+             Both are gone: the hand now lives in the MAIN dice scene (it has
+             to — dice are parented into its palm, and no die can cross into a
+             separate renderer/scene), so all that remains here is the tappable
+             name, which opens the same modal as on desktop. -->
         <div id="hand-widget">
-          <div id="hand-canvas"></div>
           <div id="hand-name-label-mobile" class="hand-name-label-mobile" title="Cambiar nombre"></div>
-          <div class="hand-controls">
-            <label>Y <input id="hand-rot-y" type="range" min="0" max="360" step="1" value="0" /></label>
-            <label>X <input id="hand-rot-x" type="range" min="0" max="360" step="1" value="0" /></label>
-          </div>
         </div>
       </div>
       <!-- Roll log. Desktop: an always-visible fixed column, flex sibling of

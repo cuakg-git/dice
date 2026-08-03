@@ -539,12 +539,13 @@ body.hand-cursor-active * {
   display: none;
 }
 
-/* Mobile: the name sits just under the hand in its floating widget. Unlike
-   the desktop label this one CAN be tapped — see nameGate.js's
-   openNameModal() — so it keeps normal pointer-events (the widget's own
-   comment already explains why events inside it never reach the board). */
+/* Mobile: the name chip in the bottom-left corner. It used to sit under the
+   hand inside its floating widget; the hand moved into the main dice scene,
+   so this is now the widget's only content. Unlike the desktop label this one
+   CAN be tapped — see nameGate.js's openNameModal() — so it keeps normal
+   pointer-events, and it stays clear of the hand's bottom-CENTRE anchor so a
+   tap on it can never be meant for the hand. */
 .hand-name-label-mobile {
-  flex: none;
   text-align: center;
   font-size: 11px;
   font-weight: 600;
@@ -865,58 +866,69 @@ body.hand-cursor-active * {
    It's a separate element, so pointer events inside it stop here and never
    reach the board canvas (no accidental dice drags); outside its bounds it
    blocks nothing. */
+/* Mobile name chip. Was a 220x260 panel holding a second WebGL canvas (a
+   decorative hand) and two rotation sliders; the hand moved into the main
+   dice scene, so this shrank to just the tappable name. Bottom-LEFT, well
+   clear of the hand's own bottom-CENTRE anchor. */
 #hand-widget {
   position: absolute;
   left: 14px;
   bottom: 14px;
-  width: 220px;
-  height: 260px;
   z-index: 10;
-  display: flex;
-  flex-direction: column;
   background: transparent;
   touch-action: none;
 }
 
-#hand-canvas {
-  flex: 1;
-  min-height: 0;
+@media (max-width: 768px) {
+  #hand-widget {
+    left: 8px;
+    bottom: 8px;
+  }
 }
 
-#hand-canvas canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.hand-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 2px 6px 0;
-}
-
-.hand-controls label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
+/* "Drag me to roll", shown above the touch hand while it is carrying dice.
+   Sits in #labels (pointer-events: none), so it can never intercept the drag
+   it is advertising. `translate(-50%, -100%)` centres it on, and lifts it
+   above, the projected point main.js positions it at — that transform is
+   applied on top of placeLabelAt's own translate() via a wrapper-free
+   `translate` property, so the two never overwrite each other. */
+.hand-prompt {
+  position: absolute;
+  top: 0;
+  left: 0;
+  translate: -50% -100%;
+  font-size: 12px;
   font-weight: 600;
-  color: #8a93a1;
+  color: #46505e;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 3px 10px;
+  border-radius: 11px;
+  white-space: nowrap;
   user-select: none;
 }
 
-.hand-controls input[type="range"] {
-  flex: 1;
-  height: 3px;
-  accent-color: #8a93a1;
+.hand-prompt[hidden] {
+  display: none;
 }
 
-@media (max-width: 768px) {
-  #hand-widget {
-    width: 32vw;
-    height: 38vw;
-    left: 8px;
-    bottom: 8px;
+/* Entrance: a short fade + rise when the first die lands in the hand. */
+.hand-prompt.is-in {
+  animation: hand-prompt-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@keyframes hand-prompt-in {
+  from {
+    opacity: 0;
+    translate: -50% calc(-100% + 6px);
+  }
+  to {
+    opacity: 1;
+    translate: -50% -100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hand-prompt.is-in {
+    animation: none;
   }
 }

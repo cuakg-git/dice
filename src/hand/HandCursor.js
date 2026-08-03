@@ -11,8 +11,17 @@ import { easeOutCubic, easeInOutCubic } from "../animation.js";
  * hitboxes to the picker — so the hand can never click itself or shadow a
  * die underneath it.
  */
-export function createHandCursor({ scene, config = HAND_CONFIG }) {
-  const c = config.cursor;
+/**
+ * `platform: "mobile"` shallow-merges config.cursor.mobile over config.cursor
+ * and puts the rig in ANCHORED mode: no pointer to chase, so it parks at a
+ * fixed anchor (setAnchor) and only moves while a finger drags it
+ * (beginDrag/endDrag), easing back afterwards. See handConfig's `anchored`
+ * block for why nothing else in the rig needed changing for touch.
+ */
+export function createHandCursor({ scene, config = HAND_CONFIG, platform = "desktop" }) {
+  const anchored = platform === "mobile";
+  const c = anchored ? { ...config.cursor, ...config.cursor.mobile } : config.cursor;
+  const anchorCfg = c.anchored;
   const scale = c.baseWorldScale * c.scaleReduction;
 
   const hand = createHand({ outlineWidth: config.outlineWidth * c.outlineWidthMultiplier });
@@ -421,6 +430,45 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     }
   }
 
+  // --- Anchored mode (touch) -------------------------------------------
+  // `anchorX/Z` is the parked position; `dragActive` is true only while a
+  // finger is actually dragging the hand. When it isn't, update() steers
+  // toward the anchor instead of the pointer target (see the goal/rate
+  // selection there).
+  let anchorX = 0;
+  let anchorZ = 0;
+  let dragActive = false;
+
+  /** Sets (and on first call, snaps to) the parked position. */
+  function setAnchor(x, z) {
+    anchorX = x;
+    anchorZ = z;
+    if (!hasTarget) {
+      pivot.position.set(x, height, z);
+      target.set(x, z);
+      hasTarget = true;
+    }
+  }
+
+  /**
+   * Starts a finger drag: the hand follows the pointer target until endDrag.
+   * Cancels any release-resistance for the same reason grabbing a die does on
+   * desktop — a fresh gesture must never feel damped or blocked.
+   */
+  function beginDrag() {
+    clearReleaseResistance();
+    dragActive = true;
+  }
+
+  /** Ends the drag; the hand eases back to the anchor from wherever it is. */
+  function endDrag() {
+    dragActive = false;
+  }
+
+  function isDragging() {
+    return dragActive;
+  }
+
   /**
    * Hover feedback toggle, driven from main with the same picker result the
    * grab uses. Just records intent; the eased blend + the "only while empty"
@@ -585,10 +633,17 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
   function update(dt, timeSeconds) {
     if (!pivot.visible) return;
 
+    // Anchored mode with no finger down: the goal is the parked anchor, not
+    // the pointer, and it's approached at its own (slower) rate. This is also
+    // where the release-resistance window lands on touch — damping the RETURN
+    // makes the hand drift home spent after a throw, which is the same beat
+    // desktop gets by damping the chase.
+    const returning = anchored && !dragActive;
+
     // Post-throw resistance: scales the follow rate down, holds it there for
     // most of the window, then eases back to normal (see resistanceRecovery
     // above for why it's a plateau-then-ease rather than a straight ease).
-    let followRate = c.followLerpPerSecond;
+    let followRate = returning ? anchorCfg.returnLerpPerSecond : c.followLerpPerSecond;
     if (resistDuration > 0) {
       resistElapsed += dt * 1000;
       if (resistElapsed >= resistDuration) {
@@ -601,10 +656,12 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
 
     // Exponential smoothing: framerate-independent, so the chase feels the
     // same at 60 and 144 fps (a raw per-frame lerp would not).
+    const goalX = returning ? anchorX : target.x;
+    const goalZ = returning ? anchorZ : target.y;
     if (hasTarget && dt > 0) {
       const alpha = 1 - Math.exp(-followRate * dt);
-      pivot.position.x += (target.x - pivot.position.x) * alpha;
-      pivot.position.z += (target.y - pivot.position.z) * alpha;
+      pivot.position.x += (goalX - pivot.position.x) * alpha;
+      pivot.position.z += (goalZ - pivot.position.z) * alpha;
     }
     pivot.position.y = height;
 
@@ -1033,6 +1090,11 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     getZoneState,
     setUIHidden,
     getUIFade,
+    anchored,
+    setAnchor,
+    beginDrag,
+    endDrag,
+    isDragging,
     update,
   };
 }

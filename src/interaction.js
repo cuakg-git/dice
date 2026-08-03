@@ -8,10 +8,19 @@ const VELOCITY_WINDOW_MS = 100; // look back this far to compute release velocit
 
 /**
  * Wires up pointer interaction (mouse + touch + pen unified via Pointer
- * Events). Two modes, chosen live per event by `getMode()`:
+ * Events). Three modes, chosen live per event by `getMode()`:
  *
- *  - "drag" (mobile): tap-to-act, plus drag with a pointer-position history
- *    for throw velocity.
+ *  - "drag": tap-to-act, plus drag with a pointer-position history for throw
+ *    velocity. The original mobile model, kept for any surface that wants
+ *    direct dice dragging.
+ *  - "handTouch" (mobile): the hand is PARKED and dice travel to it. A tap is
+ *    routed to main via onTouchTap (tap a loose die -> send it to the hand;
+ *    tap the hand -> take one back out). A press that starts ON the hand
+ *    (isOverHand) and then passes the movement threshold becomes the throw
+ *    drag: the hand follows the finger via onPointerWorldMove, and the release
+ *    is reported by onHandDragEnd. Throw velocity is NOT computed here — the
+ *    hand measures its own, exactly as in "hand" mode, so both surfaces feed
+ *    the wind-up/follow-through/launch effects from one source.
  *  - "hand" (desktop hand cursor): the pointer steers the hand (via
  *    onPointerWorldMove). The hand carries a handful (0..N dice). On
  *    pointerDOWN, a die not already in the hand is ADDED via onHandPress
@@ -44,6 +53,11 @@ export function setupInteraction({
   onHandRelease,
   onHandSecondaryPress,
   onHandHoverChange,
+  isOverHand,
+  onHandDragStart,
+  onHandDragEnd,
+  onHandDragCancel,
+  onTouchTap,
   onTap,
   onDragStart,
   onDragMove,
@@ -157,10 +171,44 @@ export function setupInteraction({
       active.handDragging = false;
       return;
     }
+    if (getMode() === "handTouch") {
+      // Touch hand mode: nothing is decided on press. Only a press that
+      // STARTS on the hand (or the handful it's carrying) can become the
+      // throw drag — a press that starts on a die is a tap candidate, which
+      // is what keeps "tap a die to send it" and "drag the hand to roll"
+      // from ever competing for the same gesture.
+      const w = worldAt(event.clientX, event.clientY);
+      active.handGrab = isOverHand?.(w.x, w.z) === true;
+      active.handDragging = false;
+      return;
+    }
     if (event.pointerType !== "mouse" && record) onPressChange?.(record, true);
   });
 
   dom.addEventListener("pointermove", (event) => {
+    if (getMode() === "handTouch") {
+      if (!active || active.id !== event.pointerId) return;
+      const dx = event.clientX - active.startX;
+      const dy = event.clientY - active.startY;
+      // Same threshold that separates tap from drag everywhere else, so the
+      // two gestures are classified consistently across modes.
+      if (!active.handDragging && active.handGrab && Math.hypot(dx, dy) > TAP_MOVE_THRESHOLD_PX) {
+        active.handDragging = true;
+        // Keep receiving moves if the finger slides off the canvas mid-throw.
+        try {
+          dom.setPointerCapture(event.pointerId);
+        } catch {
+          /* non-fatal: capture is a nicety, not required for the drag */
+        }
+        onHandDragStart?.();
+      }
+      if (active.handDragging) {
+        const w = worldAt(event.clientX, event.clientY);
+        onPointerWorldMove?.(w.x, w.z);
+      }
+      return;
+    }
+
     if (getMode() === "hand") {
       // The pointer only steers the hand; the hand is what touches dice.
       const w = worldAt(event.clientX, event.clientY);
@@ -237,6 +285,23 @@ export function setupInteraction({
       return;
     }
 
+    // Touch hand mode: a drag off the hand throws the handful; anything that
+    // never passed the movement threshold is a tap, resolved by main from the
+    // record (if any) under the release point.
+    if (getMode() === "handTouch") {
+      if (finished.handDragging) {
+        onHandDragEnd?.();
+        return;
+      }
+      const tapDx = event.clientX - finished.startX;
+      const tapDy = event.clientY - finished.startY;
+      if (Math.hypot(tapDx, tapDy) <= TAP_MOVE_THRESHOLD_PX) {
+        const w = worldAt(event.clientX, event.clientY);
+        onTouchTap?.(finished.record, w.x, w.z);
+      }
+      return;
+    }
+
     if (finished.pointerType !== "mouse" && finished.record) onPressChange?.(finished.record, false);
 
     if (finished.dragging) {
@@ -259,6 +324,12 @@ export function setupInteraction({
     if (!active || active.id !== event.pointerId) return;
     const finished = active;
     active = null;
+    // A cancelled hand drag must NOT throw (the gesture never completed) —
+    // the hand just stops following and eases home still holding its dice.
+    if (getMode() === "handTouch") {
+      if (finished.handDragging) onHandDragCancel?.();
+      return;
+    }
     if (finished.pointerType !== "mouse" && finished.record) onPressChange?.(finished.record, false);
     // Treat a cancelled drag as "dropped in place" so main can return it home.
     if (finished.dragging) {

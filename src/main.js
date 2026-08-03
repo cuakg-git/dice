@@ -260,10 +260,14 @@ dragShadow.rotation.x = -Math.PI / 2;
 dragShadow.visible = false;
 scene.add(dragShadow);
 
-// The hand cursor lives in this same scene (pointer devices only). It is
-// never handed to the raycaster, so it can't click itself or mask a die
-// under it; it floats above the board's ceiling so nothing can occlude it.
-const handCursor = createHandCursor({ scene });
+// The hand rig lives in this same scene on BOTH surfaces — it has to, since
+// dice are parented into its palm and no die can cross into a separate
+// renderer/scene. Only its steering differs: on pointer devices it chases the
+// cursor; on touch it parks at a fixed anchor and dice travel to it (see
+// handConfig's `anchored` block). It is never handed to the raycaster, so it
+// can't click itself or mask a die under it, and it floats above the board's
+// ceiling so nothing can occlude it.
+const handCursor = createHandCursor({ scene, platform: touchDevice ? "mobile" : "desktop" });
 
 // Comic-style throw feedback (streaks + speed lines). Pre-allocates its whole
 // mesh pool here so a throw never allocates; see launchEffects.js.
@@ -284,7 +288,9 @@ function anyModalOpen() {
 // below, which only ever shrinks the hand toward invisible, never flips
 // pivot.visible, so the two mechanisms can't fight over that flag.
 function updateHandCursorVisibility() {
-  handCursor.setVisible(handCursorEnabled && !anyModalOpen());
+  // No `handCursorEnabled` gate: the hand is present on touch too now, just
+  // anchored instead of cursor-following.
+  handCursor.setVisible(!anyModalOpen());
 }
 updateHandCursorVisibility();
 subscribeModalOpen(updateHandCursorVisibility);
@@ -522,6 +528,40 @@ function updateHandNameLabel() {
 updateHandNameLabel(); // position it before the first paint, not just from frame 2 onward
 
 // ---------------------------------------------------------------------------
+// "Drag me to roll" (touch only): the affordance telling the player that the
+// hand ITSELF is the throw control, since on touch there is no cursor to
+// suggest it. Shown only while the anchored hand is actually carrying dice.
+// Lives in #labels (pointer-events: none) so it can never intercept the very
+// drag it is advertising.
+// ---------------------------------------------------------------------------
+
+const HAND_PROMPT_OFFSET_Z = 2.6; // world units "above" the hand on screen (-Z)
+
+const handPromptEl = document.createElement("div");
+handPromptEl.className = "hand-prompt";
+handPromptEl.textContent = "Drag me to roll";
+handPromptEl.hidden = true;
+labelsContainer.appendChild(handPromptEl);
+
+function updateHandPrompt() {
+  if (!handCursor.anchored) return;
+  const show = handCursor.isHoldingAny() && !anyModalOpen();
+  if (show) {
+    const pos = handCursor.getPosition();
+    placeLabelAt(handPromptEl, pos.x, 0, pos.z - HAND_PROMPT_OFFSET_Z);
+  }
+  if (show === !handPromptEl.hidden) return; // no state change: just repositioned
+  handPromptEl.hidden = !show;
+  // Restart the CSS entrance every time it comes back, rather than only on
+  // the first ever appearance.
+  if (show) {
+    handPromptEl.classList.remove("is-in");
+    void handPromptEl.offsetWidth; // forces a reflow so the animation re-runs
+    handPromptEl.classList.add("is-in");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Responsive layout.
 //
 // Desktop: source strip is a narrow LEFT column (20% width), its 6 type
@@ -755,14 +795,27 @@ function rebuildLayout() {
   // thrown — can ever be drawn in front of it.
   handCursor.setHeight(boardTuning.dieRadius * boardTuning.wallHeightRatio + HAND_CONFIG.cursor.heightMargin);
 
-  // Same rectangle overTray()/drop-routing already use, so the hand's "am I
-  // over the board" and a die's "which zone did I land in" always agree.
-  handCursor.setZoneBounds({
-    centerX: trayBounds.centerX,
-    centerZ: trayBounds.centerZ,
-    halfWidth: trayBounds.width / 2,
-    halfDepth: trayBounds.depth / 2,
-  });
+  if (handCursor.anchored) {
+    // Touch: park the hand at the bottom-centre of the BOARD — thumb-
+    // reachable, clear of the top source strip, and positioned so dice thrown
+    // up the board roll away from it instead of underneath it. Recomputed per
+    // layout so it tracks the live board rect on rotation/resize.
+    handCursor.setAnchor(
+      layout.boardCenterX,
+      layout.boardCenterZ + HAND_CONFIG.cursor.anchored.anchorZFraction * (layout.boardDepth / 2)
+    );
+  } else {
+    // Same rectangle overTray()/drop-routing already use, so the hand's "am I
+    // over the board" and a die's "which zone did I land in" always agree.
+    // Desktop-only: it keys off the left source strip, which mobile's
+    // top-band layout doesn't have — the anchored hand stays full size.
+    handCursor.setZoneBounds({
+      centerX: trayBounds.centerX,
+      centerZ: trayBounds.centerZ,
+      halfWidth: trayBounds.width / 2,
+      halfDepth: trayBounds.depth / 2,
+    });
+  }
 
   updateHitboxSizes();
   updateLabels();
@@ -1144,6 +1197,88 @@ function addDieToHand(record) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Tap-to-hand travel (touch). A tapped die leaves physics immediately and arcs
+// into the palm, and the hand closes on it when it lands.
+//
+// Its own kinematic pass rather than an animateTransform tween, for two
+// reasons the tween can't cover: the destination MOVES (the palm is wherever
+// the hand is this frame), and the die has to change SIZE on the way in so it
+// arrives already nested at hold size instead of popping when caught.
+// ---------------------------------------------------------------------------
+
+const _palmWorld = new THREE.Vector3();
+let travellingCount = 0;
+
+function handPalmWorld() {
+  handCursor.hand.holdAnchor.getWorldPosition(_palmWorld);
+  return _palmWorld;
+}
+
+function sendDieToHand(record) {
+  if (!record || record.flying || record.travel) return;
+  if (handCursor.isHeldByHand(record)) return;
+
+  cancelTween(record.group);
+  record.scaleRamp = null;
+  record.dragging = false;
+
+  // The same physics/selection bookkeeping addDieToHand does, but done NOW,
+  // at the START of the trip — nothing should keep simulating (or stay
+  // selected as "on the board") while it is already on its way to the hand.
+  if (record.inTray) {
+    physics.removeDie(record);
+    record.inTray = false;
+    record.settled = false;
+  }
+  record.value = null;
+  addHeldDie(record.id, record.typeName);
+
+  const dieScale = scaleForRadius(record.dieType, dieWorldRadius(record, boardTuning.dieRadius));
+  record.restingScale = dieScale;
+  record.travel = {
+    startTime: performance.now(),
+    from: record.group.position.clone(),
+    fromQuat: record.group.quaternion.clone(),
+    fromScale: record.group.scale.x,
+    // Held dice are shrunk to nest in the palm (cluster.holdScaleMultiplier),
+    // so ramping to that size in flight means no pop when the hand takes it.
+    toScale: dieScale * HAND_CONFIG.cursor.cluster.holdScaleMultiplier,
+    dieScale,
+    gripCurl: gripCurlForDie(record.dieType),
+  };
+  travellingCount++;
+}
+
+function updateTravels() {
+  if (travellingCount === 0) return;
+  const now = performance.now();
+  const cfg = HAND_CONFIG.cursor.anchored;
+  const palm = handPalmWorld();
+
+  for (const record of records) {
+    const tr = record.travel;
+    if (!tr) continue;
+    const t = Math.min((now - tr.startTime) / cfg.travelDurationMs, 1);
+    const eased = easeOutCubic(t);
+
+    record.group.position.lerpVectors(tr.from, palm, eased);
+    // One sine bulge, zero at both ends: the die lifts clear of the board and
+    // settles into the palm with no kink at either end of the trip.
+    record.group.position.y += Math.sin(Math.PI * t) * cfg.travelArcHeight;
+    record.group.quaternion.slerpQuaternions(tr.fromQuat, record.dieType.standardQuaternion, eased);
+    record.group.scale.setScalar(THREE.MathUtils.lerp(tr.fromScale, tr.toScale, eased));
+
+    if (t >= 1) {
+      record.travel = null;
+      travellingCount--;
+      // Reparents into the palm, re-lays out the whole cluster, and starts the
+      // grip tween — the fingers close as it arrives.
+      handCursor.hold(record, { dieWorldScale: tr.dieScale, gripCurl: tr.gripCurl });
+    }
+  }
+}
+
 /** A small random in-plane offset, radius up to `mag`. */
 function scatterXZ(x, z, mag) {
   const a = Math.random() * Math.PI * 2;
@@ -1201,10 +1336,9 @@ function throwAllHeld() {
   endThrow();
   // Purely decorative, and fired AFTER every die is already routed into
   // physics — it can't delay or alter the throw. Only the dice that actually
-  // went into play get a streak (one sent home wasn't thrown).
-  if (handCursorEnabled) {
-    launchEffects.launch(released.filter((r) => r.inTray || r.flying), velocity.x, velocity.z);
-  }
+  // went into play get a streak (one sent home wasn't thrown). Runs on both
+  // surfaces: the touch hand throws through this exact same path.
+  launchEffects.launch(released.filter((r) => r.inTray || r.flying), velocity.x, velocity.z);
 }
 
 /** Drops the whole handful dead (click on empty): destination by position, no throw velocity. */
@@ -1231,10 +1365,14 @@ function removeDieFromHand(record) {
  */
 const _cursorWorld = new THREE.Vector3();
 const _dieWorld = new THREE.Vector3();
-function removeNearestHeldDie() {
+function removeNearestHeldDie(atX, atZ) {
   const held = handCursor.getHeldDice();
   if (held.length === 0) return;
-  const { x, z } = handCursor.getPosition();
+  // Defaults to the hand's own position (desktop's right-click, which has no
+  // meaningful point of its own); touch passes the tap point instead.
+  const origin = handCursor.getPosition();
+  const x = atX === undefined ? origin.x : atX;
+  const z = atZ === undefined ? origin.z : atZ;
   _cursorWorld.set(x, 0, z);
   let nearest = held[0];
   let best = Infinity;
@@ -1250,6 +1388,23 @@ function removeNearestHeldDie() {
   removeDieFromHand(nearest);
 }
 
+/**
+ * The hand's grab area (touch): its own visual reach, floored at a comfortable
+ * touch target so a small-rendering hand is still easy to catch. Used both to
+ * decide whether a press can become the throw drag and whether a tap lands on
+ * the hand (rather than on empty board).
+ */
+function isOverHand(x, z) {
+  const canvasWidthPx = renderer.domElement.clientWidth || 1;
+  const worldUnitsPerPixel = (camera.right - camera.left) / canvasWidthPx;
+  const minWorld = HAND_CONFIG.cursor.anchored.touchRadiusPx * worldUnitsPerPixel;
+  // The rig's palm is ~1.6 model units across, so half of that (scaled into
+  // world units) is roughly how far the hand visually reaches.
+  const visualWorld = 0.8 * handCursor.scale * handCursor.getVisualScale();
+  const pos = handCursor.getPosition();
+  return Math.hypot(x - pos.x, z - pos.z) <= Math.max(minWorld, visualWorld);
+}
+
 setupInteraction({
   renderer,
   camera,
@@ -1258,10 +1413,14 @@ setupInteraction({
   // would land on the cluster and you could never click "past" it to a board
   // die or to empty space. main tracks the handful itself (isHeldByHand), so
   // taking a die back out doesn't need it to be a raycast target.
-  getTargets: () => records.filter((r) => !handCursor.isHeldByHand(r)).map((r) => r.hitbox),
+  // Dice in the hand, and dice already flying toward it, are excluded on both
+  // surfaces: the handful rides at the hand and would swallow every tap/click
+  // aimed past it. Touch resolves "take one back out" by proximity instead
+  // (see onTouchTap), so nothing is lost by keeping them out of the raycast.
+  getTargets: () => records.filter((r) => !handCursor.isHeldByHand(r) && !r.travel).map((r) => r.hitbox),
   resolve: (object) => hitboxToRecord.get(object) || null,
   canDrag: (record) => !record.inTray && !record.dragging && !record.flying,
-  getMode: () => (handCursorEnabled ? "hand" : "drag"),
+  getMode: () => (handCursorEnabled ? "hand" : "handTouch"),
   onPointerWorldMove: (x, z) => handCursor.setTarget(x, z),
   // pointerDOWN: add a die that isn't already in the hand, immediately (so a
   // press-and-drag off it throws it too). Returns true iff it added, so
@@ -1287,6 +1446,32 @@ setupInteraction({
   // Right-click: take the die nearest the cursor back out of the hand (the
   // rest stay). See interaction.js for why this needs the secondary button.
   onHandSecondaryPress: () => removeNearestHeldDie(),
+
+  // --- Touch hand mode -----------------------------------------------------
+  isOverHand,
+  onHandDragStart: () => handCursor.beginDrag(),
+  onHandDragEnd: () => {
+    // endDrag FIRST so the hand is already in "easing home" mode when the
+    // throw arms the release-resistance window — that window then damps the
+    // RETURN, which is how "the hand spends itself" reads on touch.
+    handCursor.endDrag();
+    if (handCursor.isHoldingAny()) throwAllHeld();
+  },
+  // A cancelled gesture never completed, so it must not throw: the hand just
+  // stops following and eases home still carrying its dice.
+  onHandDragCancel: () => handCursor.endDrag(),
+  onTouchTap: (record, x, z) => {
+    // Tap a loose die -> it travels to the hand and is caught there.
+    if (record && !handCursor.isHeldByHand(record)) {
+      sendDieToHand(record);
+      return;
+    }
+    // Tap on/near the hand -> send the nearest carried die back where it came
+    // from. Resolved by proximity because held dice are kept out of the
+    // raycast (see getTargets). The isOverHand gate matters: without it, a tap
+    // on empty board space would eject a die too.
+    if (handCursor.isHoldingAny() && isOverHand(x, z)) removeNearestHeldDie(x, z);
+  },
   // Hover feedback: the picker reports the grabbable die under the pointer
   // (null if none); the hand curls its fingers a little in response. The
   // "only while empty" gate lives in the hand cursor.
@@ -1411,6 +1596,10 @@ onFrame((time) => {
   handCursor.setUIHidden(handCursorEnabled && !anyModalOpen() && overUIZone && !handCursor.isHoldingAny());
   handCursor.update(dt, time / 1000);
   updateHandNameLabel();
+  // Both read the hand's position for THIS frame, so they run after its
+  // update rather than before it (a die in flight aims at the live palm).
+  updateTravels();
+  updateHandPrompt();
   // After physics.sync above, so trails read this frame's die positions.
   launchEffects.update(dt);
   // Re-evaluated now that this frame's fade tween has advanced — see
