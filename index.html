@@ -35,8 +35,14 @@
         <!-- Corner controls (top-right of the STAGE, i.e. right at the
              board's edge — never under the log column on desktop, since the
              log has its own space now). The log toggle only matters on
-             mobile (see style.css); it's hidden entirely on desktop. -->
-        <div id="corner-controls">
+             mobile (see style.css); it's hidden entirely on desktop.
+             `data-ui-zone`: marks this whole subtree as "real UI, not the 3D
+             scene" — main.js hides the hand cursor and shows the native OS
+             cursor while the pointer is anywhere inside it. Tag any future
+             control the same way; no JS changes needed (see main.js's
+             overUIZone tracking, which just does `.closest('[data-ui-zone]')`
+             on whatever the pointer is over). -->
+        <div id="corner-controls" data-ui-zone>
           <button
             id="roll-log-toggle"
             type="button"
@@ -67,8 +73,10 @@
            #stage (see style.css — no transform/overlay at all in this mode).
            Mobile: unchanged from before — a sidesheet that SLIDES in over the
            scene via `transform` (#roll-log.is-open), never resizing #stage or
-           the physics board underneath. -->
-      <aside id="roll-log" aria-label="Historial de rolls">
+           the physics board underneath. `data-ui-zone` (see #corner-controls'
+           comment above): covers the whole panel, its list content and its
+           scrollbar (nothing needs tagging separately inside it). -->
+      <aside id="roll-log" aria-label="Historial de rolls" data-ui-zone>
         <div id="roll-log-head">
           <span id="roll-log-title">Rolls</span>
           <button id="roll-log-clear" type="button" title="Limpiar historial" aria-label="Limpiar historial">Limpiar</button>

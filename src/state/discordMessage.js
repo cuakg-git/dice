@@ -33,7 +33,10 @@ function formatDiscordDieLines(entry) {
 export function buildRollWebhookPayload(entry, who) {
   const header = `${who ? `🎲 ${who}` : "🎲"} — ${formatDice(entry)}`;
   const lines = [header, ...formatDiscordDieLines(entry)];
-  if (ROLL_LOG_CONFIG.showTotal) lines.push(`total ${entry.total}`);
+  // Same rule and same "Total: X" text as the sidesheet (rollLogPanel.js) —
+  // one extra trailing line, only for 2+ dice, never replacing the per-die
+  // lines above it.
+  if (ROLL_LOG_CONFIG.showTotal && entry.count >= 2) lines.push(`Total: ${entry.total}`);
   // A real "\n" character (not the two-character "\\n"), so JSON.stringify
   // encodes it as the escape sequence Discord decodes back into an actual
   // line break — the same mechanism as pressing Shift+Enter in the client.

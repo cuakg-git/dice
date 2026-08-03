@@ -17,6 +17,9 @@ const OPEN_KEY = "dice.rollLogOpen"; // session-remembered open/closed state
  * grouped into "D6: 2, 4". This is deliberately its own presentation
  * (perDieLines) rather than reusing formatValueLines — that one still backs
  * the Discord message, which keeps its grouped-by-type format unchanged.
+ * A roll of 2+ dice gets one more line after those, "Total: X" (see render()'s
+ * ROLL_LOG_CONFIG.showTotal branch) — additive, never replacing the per-die
+ * lines above it.
  */
 export function createRollLogPanel({ root = document.getElementById("roll-log") } = {}) {
   if (!root) return { destroy() {} };
@@ -115,11 +118,12 @@ export function createRollLogPanel({ root = document.getElementById("roll-log") 
       }
       item.append(lines);
 
-      // Optional total, off by default (ROLL_LOG_CONFIG.showTotal): a quiet footer.
-      if (ROLL_LOG_CONFIG.showTotal) {
+      // Trailing total (ROLL_LOG_CONFIG.showTotal): only for 2+ dice — a
+      // single die's total is just its own value, already shown above.
+      if (ROLL_LOG_CONFIG.showTotal && entry.count >= 2) {
         const total = document.createElement("div");
         total.className = "roll-log__total";
-        total.textContent = `total ${entry.total}`;
+        total.textContent = `Total: ${entry.total}`;
         item.append(total);
       }
 

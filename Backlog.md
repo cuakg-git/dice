@@ -3,11 +3,12 @@ To do
 
 - Mobile
 - Diseño de UI
-- Tamaño de mano para agarrar
 - Limpiar mesa con arrastre de mano
 - Minimo de fuerza para que el dado se tire
 - Entorno colaborativo
 - Resultado de suma en el log
+- Visibilidad de cursor en hover de UI
+- Pasar a inglés todo
 
 
 Doing
@@ -15,5 +16,5 @@ Doing
 
 Done
 - Bug cursor que vuelve
-- Fix d4
-- Tamaños de mano según el lugar ne pantalla
+- Fix d4 
+- Tamaño de mano para agarrar

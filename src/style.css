@@ -105,7 +105,10 @@ body {
    Modals opt OUT by having .hand-cursor-active removed from <body> entirely
    while they're open (see main.js's anyModalOpen()/updateCursorClass()) —
    turning "cursor visible in a modal" into the ABSENCE of this rule, not a
-   per-modal override to remember. */
+   per-modal override to remember. Same mechanism, same opt-out, for hovering
+   real page UI (buttons, the roll log): see index.html's `data-ui-zone`
+   attribute and main.js's overUIZone tracking — no per-element CSS needed
+   here either, it's still just this one class being present or not. */
 body.hand-cursor-active,
 body.hand-cursor-active * {
   cursor: none !important;
@@ -336,12 +339,18 @@ body.hand-cursor-active * {
   font-weight: 700;
 }
 
-/* Optional total (ROLL_LOG_CONFIG.showTotal, off by default): a quiet footer. */
+/* Trailing total (ROLL_LOG_CONFIG.showTotal, 2+ dice only): set apart from the
+   per-die lines above it by a thin rule, and a touch darker/heavier than
+   plain body text — differentiated without competing with the per-die values
+   (13px/700/#2f3640 above), which stay the primary content. No icon: it
+   isn't any one die's result. */
 .roll-log__total {
-  margin-top: 3px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #99a2af;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(91, 100, 114, 0.16);
+  font-size: 12px;
+  font-weight: 700;
+  color: #4a5563;
 }
 
 /* ── Corner controls (top-right): the log toggle + the Discord button, grouped

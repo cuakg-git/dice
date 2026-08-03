@@ -280,12 +280,31 @@ function anyModalOpen() {
 // The 3D hand hides itself while a modal is up (the OS cursor takes over
 // instead — see the body.hand-cursor-active handling below) so it doesn't
 // float uselessly over/behind the modal, then reappears the moment it closes.
+// This is the HARD on/off (no fade) — separate from the softer UI-zone fade
+// below, which only ever shrinks the hand toward invisible, never flips
+// pivot.visible, so the two mechanisms can't fight over that flag.
 function updateHandCursorVisibility() {
   handCursor.setVisible(handCursorEnabled && !anyModalOpen());
 }
 updateHandCursorVisibility();
 subscribeModalOpen(updateHandCursorVisibility);
 subscribeDiscordModalOpen(updateHandCursorVisibility);
+
+// UI-ZONE DETECTION: any element (or descendant of one) marked `data-ui-zone`
+// in the HTML — see index.html's #corner-controls and #roll-log — is "real
+// page UI, not the 3D scene". Tag a future control the same way and it just
+// works; nothing here needs to change. Tracked via a plain delegated
+// pointermove on `document` rather than per-element listeners, so it costs
+// one `.closest()` per move regardless of how many elements are tagged.
+const UI_ZONE_SELECTOR = "[data-ui-zone]";
+let overUIZone = false;
+
+function setOverUIZone(next) {
+  next = !!next;
+  if (next === overUIZone) return;
+  overUIZone = next;
+  updateCursorClass(); // zero-latency nudge; onFrame's call covers the fade-dependent exit case (see below)
+}
 
 // Native-cursor visibility, on <body>, not a curated element list: see
 // style.css's `body.hand-cursor-active, body.hand-cursor-active * { cursor:
@@ -302,8 +321,19 @@ subscribeDiscordModalOpen(updateHandCursorVisibility);
 // opt-out was the same "someone has to remember" failure mode that caused
 // the bug above, just one level down, so it's gone now: no override to
 // forget, the blanket rule simply isn't in effect.
+//
+// SINGLE decision point for "should the OS cursor be visible" — modals and
+// UI-zone hover both funnel through here instead of each owning their own
+// class toggle. Entering a UI zone hides the native cursor's opposite (the
+// hand) immediately by simply excluding `overUIZone` up front; LEAVING one
+// additionally waits for the hand's own fade-in (handCursor.getUIFade()) to
+// finish before handing back to `cursor:none`, so alternating quickly can
+// never produce a frame with neither cursor visible (see setUIHidden in
+// HandCursor.js for the fade itself). Re-evaluated every frame from onFrame
+// (not just on the triggering event) specifically because that fade value
+// keeps changing on its own after the triggering event has already passed.
 function updateCursorClass() {
-  const active = handCursorEnabled && !anyModalOpen();
+  const active = handCursorEnabled && !anyModalOpen() && !overUIZone && handCursor.getUIFade() >= 0.999;
   document.body.classList.toggle("hand-cursor-active", active);
 }
 updateCursorClass();
@@ -322,7 +352,7 @@ subscribeDiscordModalOpen(updateCursorClass);
 // belt-and-suspenders, kept from the original fix attempt since it's cheap
 // and still correct, just retargeted to the new class/element.
 function reassertHiddenCursor() {
-  if (!handCursorEnabled || anyModalOpen()) return;
+  if (!handCursorEnabled || anyModalOpen() || overUIZone) return;
   document.body.classList.remove("hand-cursor-active");
   void document.body.offsetWidth; // forces a reflow between the remove/add
   document.body.classList.add("hand-cursor-active");
@@ -332,13 +362,28 @@ if (handCursorEnabled) {
   // pointerenter/mouseenter on `document` (not a descendant) only fire when
   // the pointer crosses INTO the document from outside the window — exactly
   // the "re-entered through some edge" case, from any of the four sides.
-  document.addEventListener("pointerenter", reassertHiddenCursor);
-  document.addEventListener("mouseenter", reassertHiddenCursor);
+  // Their target is the element actually re-entered under, so this also
+  // resolves overUIZone correctly on that very first frame back (e.g. the
+  // pointer re-enters the window directly over the roll log) rather than
+  // waiting for a subsequent pointermove that might not come until the user
+  // moves again.
+  document.addEventListener("pointerenter", (event) => {
+    setOverUIZone(!!event.target?.closest?.(UI_ZONE_SELECTOR));
+    reassertHiddenCursor();
+  });
+  document.addEventListener("mouseenter", (event) => {
+    setOverUIZone(!!event.target?.closest?.(UI_ZONE_SELECTOR));
+    reassertHiddenCursor();
+  });
   // Covers returning from another tab/window/app with the pointer already
-  // inside the viewport (no enter event fires in that case).
+  // inside the viewport (no enter event fires in that case). No usable
+  // target here, so overUIZone is left as whatever it last was.
   window.addEventListener("focus", reassertHiddenCursor);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) reassertHiddenCursor();
+  });
+  document.addEventListener("pointermove", (event) => {
+    setOverUIZone(!!event.target?.closest?.(UI_ZONE_SELECTOR));
   });
 }
 
@@ -457,7 +502,13 @@ subscribeName((name) => {
 });
 
 function updateHandNameLabel() {
-  const visible = handCursorEnabled && !anyModalOpen();
+  // Hidden along with the hand itself while it's faded out over a UI zone
+  // (see setUIHidden's held-dice exception in HandCursor.js — same rule
+  // here, so the label never floats on its own once the hand it labels has
+  // shrunk away). Instant toggle, matching the modal case just above it —
+  // no fade of its own, only the hand animates.
+  const hiddenForUIZone = overUIZone && !handCursor.isHoldingAny();
+  const visible = handCursorEnabled && !anyModalOpen() && !hiddenForUIZone;
   handNameLabelEl.hidden = !visible;
   if (!visible) return;
   const pos = handCursor.getPosition();
@@ -1355,10 +1406,16 @@ onFrame((time) => {
 
   updateScaleRamps();
   updateTweens();
+  // Set BEFORE update() so this frame's fade tween already reflects it;
+  // skipped while holding so the hand (and its cargo) never disappears.
+  handCursor.setUIHidden(handCursorEnabled && !anyModalOpen() && overUIZone && !handCursor.isHoldingAny());
   handCursor.update(dt, time / 1000);
   updateHandNameLabel();
   // After physics.sync above, so trails read this frame's die positions.
   launchEffects.update(dt);
+  // Re-evaluated now that this frame's fade tween has advanced — see
+  // updateCursorClass's own comment for why this can't just be event-driven.
+  updateCursorClass();
 });
 
 start();

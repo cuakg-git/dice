@@ -256,6 +256,25 @@ export const HAND_CONFIG = {
       // between sizes.
       zoneHysteresisMargin: 0.5,
     },
+
+    // UI-ZONE FADE: hides the hand while the pointer is over page UI (the
+    // corner buttons, the roll-log panel — see index.html's `data-ui-zone`
+    // attribute and main.js's overUIZone tracking), so the native OS cursor
+    // can take over for clicking/scrolling. Skipped while a die is held: the
+    // hand stays put so its cargo doesn't disappear along with it.
+    //
+    // Implemented as a scale tween down to `hiddenScale` (not exactly 0 —
+    // that would give the pivot's transform a zero determinant) rather than a
+    // true opacity fade: the hand's ink-outline material is a MODULE-level
+    // singleton shared with the mobile widget's own hand instance (both
+    // Hand.js consumers are loaded in the same page, see index.html) —
+    // animating its opacity here would leak into that unrelated instance. A
+    // fast shrink reads the same as a fade for a solid flat-shaded shape and
+    // touches nothing outside this rig.
+    uiFade: {
+      transitionDuration: 100, // ms, eased (easeOutCubic)
+      hiddenScale: 0.001,
+    },
   },
 
   // Desktop-only two-hand "dice cup" formed while the player shakes a held

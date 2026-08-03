@@ -337,11 +337,39 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     const duration = zoneCfg.handScaleTransitionDuration;
     const t = duration > 0 ? THREE.MathUtils.clamp((clockMs - zoneScaleStart) / duration, 0, 1) : 1;
     zoneScaleCurrent = THREE.MathUtils.lerp(zoneScaleFrom, zoneScaleTo, easeOutCubic(t));
-    // Held dice are parented under the palm, inside this same pivot, so they
-    // pick up this factor automatically through the transform hierarchy —
-    // nothing else needs to touch their scale for them to shrink/grow with
-    // the hand in lockstep (see hold()/layoutCluster()'s local-space math).
-    pivot.scale.setScalar(scale * zoneScaleCurrent);
+  }
+
+  // --- UI-zone fade: shrinks the hand toward invisible while the pointer is
+  // over page UI, unless a die is held (see handConfig.js's uiFade block for
+  // why this is a scale tween and not a true opacity fade). Composes with
+  // zoneScale on the same final pivot.scale write below, so either can be
+  // mid-transition without the two fighting over the pivot's transform.
+  const uiCfg = c.uiFade;
+  let uiHidden = false;
+  let uiFadeFrom = 1;
+  let uiFadeTo = 1;
+  let uiFadeStart = 0;
+  let uiFadeCurrent = 1;
+
+  /** Redirects (from wherever the tween currently sits) toward shown/hidden. */
+  function setUIHidden(hidden) {
+    hidden = !!hidden;
+    if (hidden === uiHidden) return;
+    uiHidden = hidden;
+    uiFadeFrom = uiFadeCurrent;
+    uiFadeTo = hidden ? uiCfg.hiddenScale : 1;
+    uiFadeStart = clockMs;
+  }
+
+  function updateUIFade() {
+    const duration = uiCfg.transitionDuration;
+    const t = duration > 0 ? THREE.MathUtils.clamp((clockMs - uiFadeStart) / duration, 0, 1) : 1;
+    uiFadeCurrent = THREE.MathUtils.lerp(uiFadeFrom, uiFadeTo, easeOutCubic(t));
+  }
+
+  /** 1 = fully shown, `uiCfg.hiddenScale` = fully hidden; for the native-cursor decision in main.js. */
+  function getUIFade() {
+    return uiFadeCurrent;
   }
 
   /**
@@ -585,6 +613,12 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     if (history.length > c.velocityHistory) history.shift();
 
     updateZoneScale();
+    updateUIFade();
+    // Held dice are parented under the palm, inside this same pivot, so they
+    // pick up both factors automatically through the transform hierarchy —
+    // nothing else needs to touch their scale for them to shrink/grow/fade in
+    // lockstep (see hold()/layoutCluster()'s local-space math).
+    pivot.scale.setScalar(scale * zoneScaleCurrent * uiFadeCurrent);
 
     // Grip tween.
     if (gripStart >= 0) {
@@ -997,6 +1031,8 @@ export function createHandCursor({ scene, config = HAND_CONFIG }) {
     setZoneBounds,
     getVisualScale,
     getZoneState,
+    setUIHidden,
+    getUIFade,
     update,
   };
 }
