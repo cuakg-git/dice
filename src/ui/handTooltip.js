@@ -1,20 +1,33 @@
 import { HAND_CONFIG } from "../hand/handConfig.js";
+import { DICE_COLORS } from "../dice/diceColors.js";
 
 /**
- * The status tooltip that sits above the hand while it's carrying dice: one
- * "Tenés un X" line per die, with each value flipping split-flap style
- * (airport departure board) whenever the randomiser re-rolls it.
+ * The status tooltip for the dice in the hand: one "Tenés un X" row per die,
+ * each value flipping split-flap style (airport board) as the randomiser
+ * re-rolls it.
  *
- * The flip is FRAME-DRIVEN, not a CSS animation or a setTimeout: every row
- * carries a progress value advanced by the same clock as everything else. That
- * matters because the re-roll rate more than doubles while the hand is shaken,
- * so flips have to be able to start at any moment and are clamped to fit
- * inside the current interval. A timer- or keyframe-based version can overlap
- * itself at the fast rate and visibly jam; this one cannot, because a new flip
- * simply resets the same progress value.
+ * It has two poses, and slides continuously between them:
  *
- * Rows are reconciled against the held dice by identity, so a die entering or
- * leaving the handful never restarts anyone else's animation.
+ *   AT REST   — a vertical list parked above the hand, flipping slowly, values
+ *               alternating between the real number and "?".
+ *   CHARGING  — shaken: the list migrates to a fixed spot on screen, reflows
+ *               into a horizontal row, stops masking, and winds up.
+ *
+ * Everything is FRAME-DRIVEN rather than CSS-animated, for one reason: the
+ * flip interval sweeps continuously from ~1100ms to ~90ms as the crescendo
+ * builds. Keyframes or timers set up for one pace overlap themselves at
+ * another and visibly jam; a progress value re-read every frame simply can't.
+ *
+ * The same applies to the vertical->horizontal reflow. `flex-direction` isn't
+ * an animatable property, so rows are absolutely positioned and their
+ * coordinates are interpolated between the two layouts each frame — that turns
+ * an un-animatable property change into a real, continuous motion.
+ *
+ * COLOUR CONTRACT: each row carries its die type's identifying colour
+ * (DICE_COLORS — D4 magenta, D6 yellow...). The "heat" of charging is applied
+ * ONLY to the tooltip's own background, never to those chips: once the rows
+ * are side by side, that colour is the only thing telling you which die is
+ * which, and tinting it would throw that away.
  */
 export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValues }) {
   const el = document.createElement("div");
@@ -26,61 +39,70 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
   list.className = "hand-tooltip__rows";
   el.append(list);
 
-  // Optional trailing line (mobile's "Drag me to roll"), kept INSIDE the
-  // tooltip rather than as a second floating element: it appears under exactly
-  // the same condition (the hand is holding something), so sharing one
-  // positioned box means the two can never overlap or fight for space.
-  const footer = document.createElement("div");
-  footer.className = "hand-tooltip__footer";
-  footer.hidden = true;
-  el.append(footer);
-
   const overflow = document.createElement("div");
   overflow.className = "hand-tooltip__more";
   overflow.hidden = true;
   el.append(overflow);
 
+  // Trailing lines live INSIDE the tooltip rather than as separate floating
+  // elements: they appear under the same condition (the hand is holding
+  // something) and in the same place (above the hand), so sharing one
+  // positioned box means they can never overlap or fight for space.
+  const hint = document.createElement("div");
+  hint.className = "hand-tooltip__hint";
+  hint.hidden = true;
+  el.append(hint);
+
+  const footer = document.createElement("div");
+  footer.className = "hand-tooltip__footer";
+  footer.hidden = true;
+  el.append(footer);
+
   // record -> { row, flap, seenChanges, flipStart, nextText, text }
   const rows = new Map();
+  let order = []; // render order, so layout and DOM agree
+  let migration = 0; // 0 = parked above the hand (vertical), 1 = migrated (horizontal)
+  // Cached row metrics. Every row is the same shape ("Tenés un " + a
+  // fixed-width flap + a chip), so one measurement covers them all — and it's
+  // only re-taken when the row set changes, never per frame.
+  let rowW = 0;
+  let rowH = 0;
+  let metricsDirty = true;
 
   function makeRow(record) {
     const row = document.createElement("div");
     row.className = "hand-tooltip__row";
 
+    // The die's identifying colour. Never touched by the charge layers.
+    const chip = document.createElement("span");
+    chip.className = "hand-tooltip__chip";
+    chip.style.background = DICE_COLORS[record.typeName] || "#999";
+
     const lead = document.createElement("span");
+    lead.className = "hand-tooltip__lead";
     lead.textContent = "Tenés un ";
 
-    // Only this span flips; the surrounding text stays put, which is what
-    // makes it read as a single flap in a fixed frame rather than the whole
-    // line animating.
+    // Only this span flips; the text around it stays put, which is what makes
+    // it read as one flap in a fixed frame rather than the whole line moving.
     const flap = document.createElement("span");
     flap.className = "hand-tooltip__flap";
 
-    row.append(lead, flap);
+    row.append(chip, lead, flap);
     return { row, flap };
   }
 
-  /** What a row should read, honouring the masking mode. */
-  function textFor(entry) {
-    // The first value each die shows is always real; only re-rolls are hidden,
-    // and only when masking is on.
-    if (config.maskRandomizedValues && entry.changes > 0) return "?";
-    return String(entry.value);
-  }
+  const textFor = (entry) => (entry.masked ? "?" : String(entry.value));
 
-  /**
-   * Reconciles the visible rows against the current handful.
-   * `footerText` is optional trailing copy (null/"" hides it).
-   */
-  function sync(entries, footerText) {
+  /** Reconciles the visible rows against the current handful. */
+  function sync(entries, { hintText = null, footerText = null } = {}) {
     const visible = entries.slice(0, Math.max(config.maxRows, 1));
 
-    // Drop rows whose die is no longer held.
     const live = new Set(visible.map((e) => e.record));
     for (const [record, state] of rows) {
       if (live.has(record)) continue;
       state.row.remove();
       rows.delete(record);
+      metricsDirty = true;
     }
 
     visible.forEach((entry, index) => {
@@ -90,47 +112,55 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
         state = { row, flap, seenChanges: entry.changes, flipStart: -1, nextText: null, text: textFor(entry) };
         flap.textContent = state.text;
         rows.set(entry.record, state);
+        metricsDirty = true;
       } else if (entry.changes !== state.seenChanges) {
-        // A re-roll landed: start (or restart) the flip. Restarting is safe
-        // and is exactly what should happen if the rate outruns the animation.
+        // A re-roll landed: start (or restart) the flip. Restarting is exactly
+        // right if the crescendo has outrun the previous animation.
         state.seenChanges = entry.changes;
-        const next = textFor(entry);
-        // In masked mode every re-roll reads "?" — flip anyway, since the
-        // flap moving IS the signal that the value changed.
-        state.nextText = next;
+        state.nextText = textFor(entry);
         state.flipStart = performance.now();
       }
-      // Keep DOM order matching the handful order.
       if (list.children[index] !== state.row) list.insertBefore(state.row, list.children[index] || null);
     });
 
-    const hidden = entries.length - visible.length;
-    overflow.hidden = hidden <= 0;
-    if (hidden > 0) overflow.textContent = `+${hidden} más`;
+    order = visible.map((e) => rows.get(e.record)).filter(Boolean);
 
+    const extra = entries.length - visible.length;
+    overflow.hidden = extra <= 0;
+    if (extra > 0) overflow.textContent = `+${extra} más`;
+
+    hint.hidden = !hintText;
+    if (hintText) hint.textContent = hintText;
     footer.hidden = !footerText;
     if (footerText) footer.textContent = footerText;
 
-    if (el.hidden) el.hidden = false;
+    if (el.hidden) {
+      el.hidden = false;
+      metricsDirty = true;
+    }
   }
 
-  /**
-   * Advances the flips. `rate` is the randomiser's live multiplier, used to
-   * shorten the flip so it always finishes inside the current interval — this
-   * is what keeps it fluid at the shaken rate instead of overlapping itself.
-   */
-  function update(nowMs, rate = 1) {
-    if (el.hidden) return;
-    const interval = config.randomizeIntervalMs / Math.max(rate, 0.001);
-    const duration = Math.max(Math.min(config.splitFlapDuration, interval * 0.6), 60);
+  /** One layout read, taken only when the row set actually changed. */
+  function measure() {
+    if (!metricsDirty || order.length === 0) return;
+    const probe = order[0].row;
+    rowW = probe.offsetWidth || rowW;
+    rowH = probe.offsetHeight || rowH;
+    metricsDirty = false;
+  }
+
+  /** Advances the flips at whatever pace the crescendo currently dictates. */
+  function updateFlips(nowMs, flipIntervalMs) {
+    // Never let a flip outlast the gap to the next one, or they overlap and
+    // the flap appears to stall. 60ms floor keeps it visible at full charge.
+    const duration = Math.max(Math.min(config.splitFlapDuration, flipIntervalMs * 0.6), 60);
 
     for (const state of rows.values()) {
       if (state.flipStart < 0) continue;
       const t = Math.min((nowMs - state.flipStart) / duration, 1);
 
-      // First half folds the flap edge-on, second half unfolds the new
-      // character from the opposite side — the character is swapped exactly at
-      // the midpoint, while it's invisible at 90 degrees.
+      // First half folds the flap edge-on; the character is swapped exactly at
+      // the midpoint while it's invisible at 90 degrees, then unfolds.
       if (t < 0.5) {
         state.flap.style.transform = `rotateX(${t * 2 * 90}deg)`;
       } else {
@@ -149,8 +179,108 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
     }
   }
 
-  function place(x, y) {
-    el.style.transform = `translate(${x}px, ${y}px)`;
+  /**
+   * Interpolates every row between the vertical (stacked) and horizontal
+   * (side-by-side) layouts, and sizes the container to match.
+   */
+  function layout(availableWidth) {
+    measure();
+    if (order.length === 0 || rowW === 0) return 1;
+
+    const gap = 10;
+    const n = order.length;
+    const vW = rowW;
+    const vH = rowH * n;
+    const hW = rowW * n + gap * (n - 1);
+    const hH = rowH;
+
+    order.forEach((state, i) => {
+      const vx = 0;
+      const vy = i * rowH;
+      const hx = i * (rowW + gap);
+      const hy = 0;
+      state.row.style.transform = `translate(${vx + (hx - vx) * migration}px, ${vy + (hy - vy) * migration}px)`;
+    });
+
+    const w = vW + (hW - vW) * migration;
+    list.style.width = `${w}px`;
+    list.style.height = `${vH + (hH - vH) * migration}px`;
+
+    // A row of N "Tenés un X" entries is wide, and on a phone it would run off
+    // both edges. Scaling the whole box to fit keeps the reflow continuous —
+    // unlike shortening the rows, which would jump and invalidate the metrics.
+    return availableWidth > 0 ? Math.min(1, availableWidth / (w + 28)) : 1;
+  }
+
+  /**
+   * The four "charging" layers. All are driven by the SAME crescendo progress
+   * so they read as one build-up rather than four effects, and each is
+   * independently switchable from config to calibrate which ones earn a place.
+   */
+  function applyCharge(charge, x, y, fitScale) {
+    let jitterX = 0;
+    let jitterY = 0;
+    if (config.chargeShakeEnabled && charge > 0) {
+      const amp = config.chargeShakeAmount * charge;
+      jitterX = (Math.random() * 2 - 1) * amp;
+      jitterY = (Math.random() * 2 - 1) * amp;
+    }
+
+    const grow = config.chargeScaleEnabled ? 1 + config.chargeScaleAmount * charge : 1;
+    // Fit scale and charge scale multiply: the box may never outgrow the
+    // viewport, however hard it's being charged.
+    const scale = grow * fitScale;
+    // transform-origin is the pin point (see CSS), so growing doesn't drag the
+    // tooltip off the spot it's anchored to.
+    el.style.transform = `translate(${x + jitterX}px, ${y + jitterY}px) scale(${scale})`;
+
+    if (config.chargeGlowEnabled) {
+      const g = config.chargeGlowAmount * charge;
+      el.style.boxShadow =
+        g > 0.001
+          ? `0 2px 10px rgba(28, 34, 43, 0.1), 0 0 ${12 + 22 * g}px rgba(255, 150, 60, ${0.5 * g})`
+          : "";
+    } else {
+      el.style.boxShadow = "";
+    }
+
+    if (config.chargeTemperatureEnabled) {
+      // Warm shift on the BACKGROUND only — never the per-type chips.
+      const t = config.chargeTemperatureAmount * charge;
+      const r = Math.round(255 + (255 - 255) * t);
+      const g2 = Math.round(255 + (232 - 255) * t);
+      const b = Math.round(255 + (198 - 255) * t);
+      el.style.background = `rgba(${r}, ${g2}, ${b}, ${0.82 + 0.12 * t})`;
+    } else {
+      el.style.background = "";
+    }
+  }
+
+  /**
+   * One call per frame: advances migration, flips, layout and the charge
+   * layers, and positions the box between the hand and its parked spot.
+   */
+  function update(
+    nowMs,
+    dtMs,
+    { charge = 0, shaking = false, flipIntervalMs = 1000, handPoint, parkedPoint, viewportWidth = 0 }
+  ) {
+    if (el.hidden) return;
+
+    // Migration is its own tween, not the crescendo: how fast the box travels
+    // is a separate question from how wound-up it is.
+    const dur = Math.max(config.tooltipMigrationDuration, 1);
+    migration = shaking ? Math.min(1, migration + dtMs / dur) : Math.max(0, migration - dtMs / dur);
+    // Ease so it leaves and arrives softly instead of tracking linearly.
+    const m = migration < 0.5 ? 4 * migration ** 3 : 1 - Math.pow(-2 * migration + 2, 3) / 2;
+
+    updateFlips(nowMs, flipIntervalMs);
+    const fitScale = layout(viewportWidth);
+
+    el.classList.toggle("is-migrated", migration > 0.5);
+    const x = handPoint.x + (parkedPoint.x - handPoint.x) * m;
+    const y = handPoint.y + (parkedPoint.y - handPoint.y) * m;
+    applyCharge(charge, x, y, fitScale);
   }
 
   function hide() {
@@ -158,7 +288,12 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
     el.hidden = true;
     for (const state of rows.values()) state.row.remove();
     rows.clear();
+    order = [];
+    migration = 0;
+    metricsDirty = true;
+    el.style.boxShadow = "";
+    el.style.background = "";
   }
 
-  return { sync, update, place, hide, el };
+  return { sync, update, hide, el, getMigration: () => migration };
 }

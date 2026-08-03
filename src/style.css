@@ -917,19 +917,50 @@ body.hand-cursor-active * {
   display: none;
 }
 
+/* Rows are absolutely positioned and placed by JS: `flex-direction` can't be
+   animated, so the vertical->horizontal reflow is done by interpolating each
+   row's coordinates every frame instead (see handTooltip.js's layout()). The
+   container's own width/height are set from the same interpolation. */
+.hand-tooltip__rows {
+  position: relative;
+}
+
 .hand-tooltip__row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   line-height: 1.5;
+  white-space: nowrap;
   /* Gives the flap a real third dimension to rotate through; without it the
      rotateX below is a flat vertical squash instead of a flip. */
   perspective: 220px;
 }
 
+/* The die type's identifying colour (DICE_COLORS). Deliberately untouched by
+   the charge layers — once the rows sit side by side this is the only cue for
+   which die is which, so the "heat" of charging stays on the background. */
+.hand-tooltip__chip {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(28, 34, 43, 0.22);
+}
+
+.hand-tooltip__lead {
+  flex: none;
+}
+
 /* The one character that flips. inline-block so the transform applies (an
-   inline box ignores transforms), and a fixed min-width so a 1->2 digit change
-   doesn't shift the rest of the line mid-flip. */
+   inline box ignores transforms), and a fixed min-width wide enough for "?"
+   and for two digits alike — so a 1->20 change never resizes the row and
+   never invalidates the cached layout metrics. */
 .hand-tooltip__flap {
   display: inline-block;
-  min-width: 1.1em;
+  min-width: 1.6em;
   text-align: center;
   font-weight: 700;
   color: #2f3640;
@@ -942,6 +973,35 @@ body.hand-cursor-active * {
   font-size: 11px;
   font-weight: 600;
   color: #99a2af;
+}
+
+/* "Shake me": the invitation, shown only while the hand is holding dice, is
+   still, and isn't parked over the source strip. */
+.hand-tooltip__hint {
+  margin-top: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a93a1;
+  transition: opacity 160ms ease;
+}
+
+.hand-tooltip__hint[hidden],
+.hand-tooltip__lead[hidden] {
+  display: none;
+}
+
+/* Migrated (charging) pose: centred on its parked spot rather than pinned
+   above the hand.
+   Row CONTENT is deliberately identical in both poses. Dropping the "Tenés
+   un" prose when horizontal would be tighter, but it changes every row's
+   width — which both invalidates the cached layout metrics and produces a
+   visible jump at the moment it switches. The horizontal row is kept inside
+   the viewport by scaling instead (see handTooltip.js's fit scale), which is
+   continuous and needs no re-measurement. */
+.hand-tooltip.is-migrated {
+  translate: -50% -50%;
 }
 
 .hand-tooltip__footer {

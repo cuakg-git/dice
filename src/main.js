@@ -559,7 +559,7 @@ const HAND_TOOLTIP_OFFSET_Z = 2.6; // world units "above" the hand on screen (-Z
 const heldValues = createHeldValues();
 const handTooltip = createHandTooltip({ parent: labelsContainer });
 
-function updateHandTooltip(nowMs) {
+function updateHandTooltip(nowMs, dtMs) {
   if (anyModalOpen() || !handCursor.isHoldingAny()) {
     handTooltip.hide();
     return;
@@ -569,17 +569,48 @@ function updateHandTooltip(nowMs) {
     handTooltip.hide();
     return;
   }
-  handTooltip.sync(rows, handCursor.anchored ? "Drag me to roll" : null);
-  handTooltip.update(nowMs, heldValues.getRate());
 
-  // Positioned like every other world-anchored label; the tooltip's own CSS
-  // centres it on this point and lifts it clear of the hand.
+  const shaking = handCursor.getShakeState().shakeActive === true;
+  // "Shake me" is an invitation, so it only shows when the invitation is
+  // actually open: dice in hand, hand still, and not parked over the source
+  // strip (where the gesture in progress is picking dice up, not rolling).
+  // The hand's own zone state is the same signal that shrinks it there, so the
+  // two can never disagree. On touch the anchored hand never enters that zone,
+  // so inOriginZone is simply always false there.
+  const inGrabZone = handCursor.getZoneState().inOriginZone === true;
+  const hintText = !shaking && !inGrabZone ? "Shake me" : null;
+
+  handTooltip.sync(rows, {
+    hintText,
+    // Mobile's throw affordance, hidden while charging so the migrated box
+    // stays focused on the crescendo.
+    footerText: handCursor.anchored && !shaking ? "Drag me to roll" : null,
+  });
+
+  // Two candidate positions in screen space; the tooltip interpolates between
+  // them by its own migration progress.
   const pos = handCursor.getPosition();
   _tooltipAnchor.set(pos.x, 0, pos.z - HAND_TOOLTIP_OFFSET_Z).project(camera);
-  handTooltip.place(
-    (_tooltipAnchor.x * 0.5 + 0.5) * viewportRect.width,
-    (1 - (_tooltipAnchor.y * 0.5 + 0.5)) * viewportRect.height
-  );
+  const handPoint = {
+    x: (_tooltipAnchor.x * 0.5 + 0.5) * viewportRect.width,
+    y: (1 - (_tooltipAnchor.y * 0.5 + 0.5)) * viewportRect.height,
+  };
+  // Parked spot: bottom-centre. Higher on touch, where the hand is itself
+  // anchored at the bottom centre and would be covered otherwise.
+  const cfg = HAND_CONFIG.cursor.heldValues;
+  const parkedPoint = {
+    x: viewportRect.width / 2,
+    y: viewportRect.height * (handCursor.anchored ? cfg.migratedYFractionMobile : cfg.migratedYFraction),
+  };
+
+  handTooltip.update(nowMs, dtMs, {
+    charge: heldValues.getCharge(),
+    shaking,
+    flipIntervalMs: heldValues.flipIntervalMs(),
+    handPoint,
+    parkedPoint,
+    viewportWidth: viewportRect.width,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -968,14 +999,17 @@ function rollAngvel(vx, vz, speed, factor) {
   };
 }
 
-function throwDieIntoTray(record, dropX, dropZ, velX, velZ) {
+function throwDieIntoTray(record, dropX, dropZ, velX, velZ, chargeMultiplier = 1) {
   const b = boardInnerBounds();
   const x = THREE.MathUtils.clamp(dropX, b.xMin, b.xMax);
   const z = THREE.MathUtils.clamp(dropZ, b.zMin, b.zMax);
 
   // Same gesture, `throwForceMultiplier` times the inertia — the multiplier
   // scales the launch velocity and the cap together (see BOARD_TUNING).
-  const force = boardTuning.throwForceMultiplier;
+  // `chargeMultiplier` (heldValues.js's forceMultiplier(), 1 if never shaken)
+  // folds in the SAME way: the cap rises with it too, or a charged throw
+  // already at the old cap would gain nothing at all.
+  const force = boardTuning.throwForceMultiplier * chargeMultiplier;
   const maxSpeed = boardTuning.maxThrowSpeed * force;
   let speed = Math.hypot(velX, velZ) * force;
   let vx = velX * force;
@@ -1000,8 +1034,15 @@ function throwDieIntoTray(record, dropX, dropZ, velX, velZ) {
     scale,
     linvel: { x: vx, y: 0, z: vz },
     angvel,
-    linearDamping: boardTuning.linearDamping,
-    angularDamping: boardTuning.angularDamping,
+    // Damping scales with the SAME chargeMultiplier as the launch speed: a
+    // charged throw carries proportionally more kinetic + spin energy, and
+    // scaling its damping to match is what keeps settle time from growing
+    // with it (measured: an uncompensated max-charge mobile throw took
+    // ~5.8s to sleep; scaled, it's back to a normal few seconds — see the
+    // task notes). At chargeMultiplier 1 (never shaken) this is exactly the
+    // existing damping, unchanged.
+    linearDamping: boardTuning.linearDamping * chargeMultiplier,
+    angularDamping: boardTuning.angularDamping * chargeMultiplier,
   });
   record.inTray = true;
   record.settled = false;
@@ -1028,7 +1069,7 @@ function throwDieIntoTray(record, dropX, dropZ, velX, velZ) {
  * entryVel*flightTime) is clamped inside the board so the die always enters
  * in bounds regardless of how far outside it was released.
  */
-function computeFlickEntry(releaseX, releaseZ, velX, velZ, speed) {
+function computeFlickEntry(releaseX, releaseZ, velX, velZ, speed, chargeMultiplier = 1) {
   const b = boardInnerBounds();
 
   const overLeft = b.xMin - releaseX;
@@ -1043,8 +1084,11 @@ function computeFlickEntry(releaseX, releaseZ, velX, velZ, speed) {
     1
   );
   // Same throwForceMultiplier as the in-board throw, so a flick gains exactly
-  // the same 25% and the two entry paths stay consistent with each other.
-  const force = boardTuning.throwForceMultiplier;
+  // the same bonus (base + charge) and the two entry paths stay consistent.
+  // Whatever this raises the cap to, `entryX/entryZ` below are STILL clamped
+  // into the board — the flick's landing point can never leave it, at any
+  // multiplier (see the clamp a few lines down).
+  const force = boardTuning.throwForceMultiplier * chargeMultiplier;
   const inwardSpeed =
     THREE.MathUtils.lerp(boardTuning.flickMinInwardSpeed, boardTuning.maxThrowSpeed, forceFrac) * force;
   const cap = boardTuning.maxThrowSpeed * force;
@@ -1077,8 +1121,8 @@ function computeFlickEntry(releaseX, releaseZ, velX, velZ, speed) {
  * deeper the harder it was flicked. CCD (enabled in DicePhysics.addDie) stops
  * a fast handoff from tunnelling the floor/walls.
  */
-function flickDieIntoBoard(record, releaseX, releaseZ, velX, velZ, speed) {
-  const { entryX, entryZ } = computeFlickEntry(releaseX, releaseZ, velX, velZ, speed);
+function flickDieIntoBoard(record, releaseX, releaseZ, velX, velZ, speed, chargeMultiplier = 1) {
+  const { entryX, entryZ } = computeFlickEntry(releaseX, releaseZ, velX, velZ, speed, chargeMultiplier);
 
   // Lock to board scale now so the collider built at handoff matches the
   // rendered size exactly (the drag ramp is usually already done anyway).
@@ -1123,6 +1167,7 @@ function flickDieIntoBoard(record, releaseX, releaseZ, velX, velZ, speed) {
     vy0,
     g,
     T,
+    chargeMultiplier, // carried through to the physics handoff in updateFlights()
     startTime: performance.now(),
     startQuat: record.group.quaternion.clone(),
     angAxis,
@@ -1161,8 +1206,9 @@ function updateFlights() {
         scale: f.scale,
         linvel: { x: f.vHx, y: vyEnd, z: f.vHz },
         angvel: f.angvel,
-        linearDamping: boardTuning.linearDamping,
-        angularDamping: boardTuning.angularDamping,
+        // Same charge-scaled damping as the in-board throw path — see its note.
+        linearDamping: boardTuning.linearDamping * f.chargeMultiplier,
+        angularDamping: boardTuning.angularDamping * f.chargeMultiplier,
       });
       record.inTray = true;
       record.settled = false;
@@ -1333,7 +1379,7 @@ function scatterXZ(x, z, mag) {
  * sat in the cluster). `dead` forces a no-velocity drop (the click-to-drop
  * path) regardless of the hand's motion.
  */
-function routeReleasedDie(record, baseX, baseZ, velX, velZ, dead) {
+function routeReleasedDie(record, baseX, baseZ, velX, velZ, dead, chargeMultiplier = 1) {
   const speed = Math.hypot(velX, velZ);
   if (overTray(baseX, baseZ)) {
     // Dead drop: no throw velocity, just a little positional scatter so a
@@ -1342,10 +1388,10 @@ function routeReleasedDie(record, baseX, baseZ, velX, velZ, dead) {
       const p = scatterXZ(baseX, baseZ, HAND_CONFIG.cursor.multiThrow.posScatter);
       throwDieIntoTray(record, p.x, p.z, 0, 0);
     } else {
-      throwDieIntoTray(record, baseX, baseZ, velX, velZ);
+      throwDieIntoTray(record, baseX, baseZ, velX, velZ, chargeMultiplier);
     }
   } else if (!dead && speed >= boardTuning.flickSpeedThreshold) {
-    flickDieIntoBoard(record, baseX, baseZ, velX, velZ, speed);
+    flickDieIntoBoard(record, baseX, baseZ, velX, velZ, speed, chargeMultiplier);
   } else {
     returnDieToTable(record);
   }
@@ -1364,6 +1410,11 @@ function disperseVelocity(velX, velZ) {
 /** Throws the whole handful: each die inherits the hand's velocity + its own scatter. */
 function throwAllHeld() {
   const velocity = handCursor.getVelocity();
+  // Read once, right here, before anything below can change it: the level
+  // charged at the INSTANT of release, per spec — not whatever it decays to a
+  // moment later. Shaking is an option that adds force, never a requirement:
+  // an un-shaken throw reads 1 (no bonus, no penalty).
+  const chargeMultiplier = heldValues.forceMultiplier();
   const released = handCursor.releaseAll(); // detaches all, preserving world transforms
   heldValues.clear(); // out of the hand: physics owns the value again
   clearHeldDice();
@@ -1372,15 +1423,24 @@ function throwAllHeld() {
     // Each die is at its own cluster world position now (already spread).
     const baseX = record.group.position.x;
     const baseZ = record.group.position.z;
+    // Scatter is computed on the RAW gesture velocity, same as before charge
+    // existed — chargeMultiplier is applied later, inside throwDieIntoTray/
+    // flickDieIntoBoard, combined with throwForceMultiplier at the exact spot
+    // that already scales aim + scatter together. That means a charged throw
+    // fans out MORE in absolute terms (same relative scatter, bigger vector),
+    // which is what keeps a maximally charged handful from all landing
+    // bunched against the far wall.
     const v = disperseVelocity(velocity.x, velocity.z);
-    routeReleasedDie(record, baseX, baseZ, v.x, v.z, false);
+    routeReleasedDie(record, baseX, baseZ, v.x, v.z, false, chargeMultiplier);
   }
   endThrow();
   // Purely decorative, and fired AFTER every die is already routed into
   // physics — it can't delay or alter the throw. Only the dice that actually
   // went into play get a streak (one sent home wasn't thrown). Runs on both
-  // surfaces: the touch hand throws through this exact same path.
-  launchEffects.launch(released.filter((r) => r.inTray || r.flying), velocity.x, velocity.z);
+  // surfaces: the touch hand throws through this exact same path. Fed the
+  // CHARGED velocity, same as the dice themselves got, so a fully charged
+  // throw reads as visibly the most forceful one on screen too.
+  launchEffects.launch(released.filter((r) => r.inTray || r.flying), velocity.x * chargeMultiplier, velocity.z * chargeMultiplier);
 }
 
 /** Drops the whole handful dead (click on empty): destination by position, no throw velocity. */
@@ -1646,7 +1706,7 @@ onFrame((time) => {
   // Re-rolls held values, keyed off the hand's OWN shake state so the faster
   // rhythm and the left hand appearing are always the same gesture.
   heldValues.update(dt * 1000, { shaking: handCursor.getShakeState().shakeActive });
-  updateHandTooltip(time);
+  updateHandTooltip(time, dt * 1000);
   // After physics.sync above, so trails read this frame's die positions.
   launchEffects.update(dt);
   // Re-evaluated now that this frame's fade tween has advanced — see

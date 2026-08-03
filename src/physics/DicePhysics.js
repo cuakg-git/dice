@@ -32,6 +32,18 @@ export async function createDicePhysics() {
 
   const world = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 });
   world.timestep = FIXED_DT;
+  // Rapier's world-level CCD budget defaults to 1 substep per step, which was
+  // never exercised before charged throws could reach ~2.5x their old top
+  // speed: at that speed a die crosses a large fraction of its own size in a
+  // single 1/60s step, and one CCD substep isn't always enough to resolve a
+  // fast, tumbling impact against a wall without a brief (but real —
+  // measured ~0.1 world units) overshoot past its inner face before the
+  // solver pushes it back out. Raising the budget gives Rapier the sub-
+  // iterations to resolve that same contact within the step it happens,
+  // instead of visibly correcting it a frame or two late. Per-body
+  // setCcdEnabled(true) below is necessary but NOT sufficient on its own —
+  // this is the other half of the same mechanism.
+  world.integrationParameters.maxCcdSubsteps = 4;
 
   // record.id -> { body, record, prevPos, prevQuat, curPos, curQuat }
   const entries = new Map();

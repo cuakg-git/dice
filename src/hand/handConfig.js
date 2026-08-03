@@ -317,20 +317,85 @@ export const HAND_CONFIG = {
     // randomised value — see the note on `maskRandomizedValues` below and the
     // module comment in dice/heldValues.js.
     heldValues: {
-      randomizeIntervalMs: 700, // base rhythm; deliberately unhurried
-      shakeRandomizeMultiplier: 2.5, // rate x this while the shake gesture is live
-      shakeRampDuration: 320, // ms to ease between the two rates, in BOTH directions
+      // --- Rhythm at rest ---------------------------------------------
+      idleFlipIntervalMs: 1100, // unhurried: this is the "nothing is happening yet" pace
       // Staggers the handful so ten dice never re-roll on the same frame.
       phaseOffsetMs: 90,
-      // Masked mode (default): the FIRST value a die shows is real, and every
-      // value after it reads "?" — the die is mid-spin, so you don't get to
-      // know it. Turn this off to watch the real numbers tumble instead.
-      // Both modes are fully implemented; this flag is the only difference.
+      // Masked mode (default): values ALTERNATE between the real number and
+      // "?" while at rest, so the tooltip neither gives the roll away nor sits
+      // permanently blanked. Turn this off to watch the real numbers tumble.
       maskRandomizedValues: true,
-      splitFlapDuration: 260, // ms per character flip
+      // How many masked flips per revealed one. 1 = strict alternation
+      // (number, ?, number, ?...). Chosen over a separate mask *interval*
+      // deliberately: tying the alternation to the flip COUNT keeps it locked
+      // to the split-flap, whereas an independent ms clock would drift against
+      // it and leave the flap changing mid-rotation.
+      maskAlternateRatio: 1,
+      splitFlapDuration: 260, // ms per character flip (clamped to fit the live interval)
       // Beyond this many dice the tooltip stops growing and compacts the
       // remainder into a single "+N más" line.
       maxRows: 6,
+
+      // --- Crescendo while shaking ------------------------------------
+      // Shaking doesn't jump to a fixed speed: the flip interval ramps from
+      // `shakeFlipStartMs` down to `shakeFlipMinMs` over `crescendoDuration`,
+      // so it reads as something winding up rather than switching on. Letting
+      // go unwinds the same ramp over `shakeDecelDuration`.
+      shakeFlipStartMs: 420, // interval the moment a shake is detected
+      shakeFlipMinMs: 90, // fastest it will ever get (the ceiling of the charge)
+      crescendoDuration: 2600, // ms of sustained shaking to reach full charge
+      // "easeIn" | "linear" | "easeInOut". easeIn holds back early and rushes
+      // late, which is what actually reads as a crescendo — linear feels like
+      // a machine ramping.
+      crescendoCurve: "easeIn",
+      shakeDecelDuration: 900, // ms to fall back to the resting rhythm
+
+      // --- Throw force bonus -------------------------------------------
+      // The SAME crescendo progress that drives the visual layers below also
+      // multiplies the die's launch impulse — read once, at the instant of
+      // release (see main.js's throwAllHeld). Deliberately not a second,
+      // independent "charge" concept: it reuses getCharge()'s live value, so
+      // what the crescendo shows on screen (the jitter/glow/flip speed) is
+      // ALWAYS exactly what the throw is about to get. A separate decay timer
+      // for the force would let the two drift apart — e.g. the tooltip
+      // visibly calmed down while the throw still came out at full power —
+      // so there is no `chargeDecayDuration` here: `shakeDecelDuration` above
+      // already decays charge smoothly toward 0 the moment shaking stops, and
+      // that single decay now governs both the visuals and the force bonus.
+      chargeForceMultiplierMax: 2.5, // launch impulse at full charge, relative to no charge at all
+      // "linear" (default): half the charge gives ~half the bonus, as asked.
+      // The visual crescendo uses easeIn instead — different job, different
+      // curve — but reuses the same CURVES table, so a matching easeIn/
+      // easeInOut force feel is a one-line change if it calibrates better.
+      chargeForceCurve: "linear",
+
+      // --- Tooltip migration ------------------------------------------
+      // On shake the tooltip leaves the hand for a fixed spot and reflows from
+      // a vertical list to a horizontal row; both are interpolated over this.
+      tooltipMigrationDuration: 420,
+      migratedYFraction: 0.86, // desktop: fraction of viewport height for the parked spot
+      // Mobile parks it higher: the hand itself is anchored at the bottom
+      // centre there, so 0.86 would drop the tooltip on top of it.
+      migratedYFractionMobile: 0.7,
+
+      // --- "Charging" layers ------------------------------------------
+      // All four scale with the SAME crescendo progress so they read as one
+      // phenomenon, and each can be switched off on its own to calibrate which
+      // ones actually earn their place. Defaults are deliberately restrained —
+      // with the hand shaking and the flaps racing there is already a lot
+      // moving, and these are meant to be felt more than noticed.
+      chargeShakeEnabled: true,
+      chargeShakeAmount: 2.5, // px of jitter at full charge (the primary "about to burst" cue)
+      chargeScaleEnabled: true,
+      chargeScaleAmount: 0.12, // +12% at full charge
+      chargeGlowEnabled: true,
+      chargeGlowAmount: 0.55, // 0..1 strength of the halo at full charge
+      chargeTemperatureEnabled: true,
+      // Warm shift applied ONLY to the tooltip's own background. Never to the
+      // rows: each die is identified by its type colour (DICE_COLORS — D4
+      // magenta, D6 yellow...), and tinting those would destroy the one cue
+      // telling you which die is which, especially once they're in a row.
+      chargeTemperatureAmount: 0.5, // 0..1 blend toward the warm end at full charge
     },
 
     // PLATFORM OVERRIDES: only values that genuinely must differ on touch.
