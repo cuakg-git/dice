@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Backlog.md",
+                "file": "Diseño/stitch_fantasy_dice_roller_hud_redesign/iron_oak/DESIGN.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Backlog"
+              "title": "DESIGN"
             }
           }
         ]
@@ -188,15 +188,18 @@
       "bases:Crear nueva base": false
     }
   },
-  "active": "db479de3a63942f5",
+  "active": "b63ce962ae58d286",
   "lastOpenFiles": [
-    "dist/assets/index-DnoPi34F.js",
-    "dist/assets/index-BB_e6l2-.css",
+    "RIG_SPEC.md",
+    "RIG_SPEC.md.tmp.23532.65518806d0e2",
+    "vite.config.js.timestamp-1785864624109-1b046150391ac8.mjs",
+    "dist/assets/index-Cr54QI57.js",
+    "dist/assets/index-BBfra4UU.css",
     "dist/assets/favicon-48-Gxch292h.png",
     "dist/assets/favicon-16-D8E_ImAR.png",
     "dist/assets/favicon-32-DplhqQv_.png",
-    "dist/assets/d8-CkACFZK2.png",
     "dist/assets/d6-amT8Cv8k.png",
+    "dist/assets/d8-CkACFZK2.png",
     "dist/assets/d4-BUd5N7Ok.png",
     "dist/assets/d20-CV9zO0Jl.png",
     "dist/assets/d12-CEZgN52K.png",
@@ -205,12 +208,9 @@
     "dist/assets",
     "dist/index.html",
     "dist",
-    "vite.config.js.timestamp-1785765497485-3bd11d685424a8.mjs",
-    "__force_verify.mjs.tmp.15908.2195921d2a70",
-    "__force_verify.mjs.tmp.15908.da6b184d3240",
-    "__force_verify.mjs.tmp.15908.c135bb769798",
-    "__force_verify.mjs.tmp.15908.8cda8d7a71a3",
-    "src/main.js.tmp.15908.4d06d3333127",
+    "vite.config.js.timestamp-1785864559652-21b5f7f9d66b3.mjs",
+    "src/ui/handTooltip.js.tmp.2536.6a8a80f96011",
+    "__tooltip_verify.mjs.tmp.2536.aebc0a28f4fe",
     "Backlog.md"
   ]
 }

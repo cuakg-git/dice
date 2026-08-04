@@ -362,7 +362,18 @@ export const HAND_CONFIG = {
       // so there is no `chargeDecayDuration` here: `shakeDecelDuration` above
       // already decays charge smoothly toward 0 the moment shaking stops, and
       // that single decay now governs both the visuals and the force bonus.
-      chargeForceMultiplierMax: 2.5, // launch impulse at full charge, relative to no charge at all
+      // Raised from 2.5 to 4 (see task notes): the gap between an un-shaken
+      // throw and a fully-charged one needed to read as more than a mild
+      // bump. Verified headless against the real Rapier engine at this value,
+      // worst case (max gesture speed thrown straight at each of the 4
+      // walls, both platforms): containment held with NO physics changes
+      // needed — CCD plus the existing wall thickness never let a die's
+      // excursion past the inner wall face exceed its own radius, and it
+      // still settled in <=5s (existing damping). The flick's entry point
+      // stays clamped inside the board at this multiplier too, as it
+      // structurally must (see computeFlickEntry in main.js — the clamp
+      // doesn't care how large the pre-clamp velocity was).
+      chargeForceMultiplierMax: 4, // launch impulse at full charge, relative to no charge at all
       // "linear" (default): half the charge gives ~half the bonus, as asked.
       // The visual crescendo uses easeIn instead — different job, different
       // curve — but reuses the same CURVES table, so a matching easeIn/

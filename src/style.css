@@ -890,16 +890,21 @@ body.hand-cursor-active * {
    #labels (pointer-events: none), so on touch it can never intercept the drag
    its own footer advertises.
 
-   `translate: -50% -100%` centres it on, and lifts it above, the projected
-   point main.js positions it at. That's the standalone `translate` property,
-   NOT `transform` — main.js writes `transform` for the projected position, and
-   the two compose instead of overwriting each other (per spec, translate is
-   applied before transform). */
+   Positioning is 100% JS (handTooltip.js's place()): `transform: translate()
+   scale()`, computed in pixels from the box's own measured size so the
+   anchor point — bottom edge at rest, centre once migrated — lands exactly
+   where intended regardless of scale or row count. It used to be split
+   between this and a CSS `translate: -50%` percentage trick toggled by a
+   class at a hard threshold; that split (two systems computing overlapping
+   offsets on different schedules) is what caused the migrated tooltip to sit
+   off-centre. `transform-origin` is set explicitly (rather than relying on
+   the default) because the placement maths depends on scaling happening
+   around the box's own centre. */
 .hand-tooltip {
   position: absolute;
   top: 0;
   left: 0;
-  translate: -50% -100%;
+  transform-origin: center center;
   padding: 6px 10px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.82);
@@ -910,7 +915,7 @@ body.hand-cursor-active * {
   color: #46505e;
   white-space: nowrap;
   user-select: none;
-  animation: hand-tooltip-in 180ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: hand-tooltip-in 180ms ease-out both;
 }
 
 .hand-tooltip[hidden] {
@@ -992,17 +997,15 @@ body.hand-cursor-active * {
   display: none;
 }
 
-/* Migrated (charging) pose: centred on its parked spot rather than pinned
-   above the hand.
-   Row CONTENT is deliberately identical in both poses. Dropping the "Tenés
-   un" prose when horizontal would be tighter, but it changes every row's
-   width — which both invalidates the cached layout metrics and produces a
-   visible jump at the moment it switches. The horizontal row is kept inside
-   the viewport by scaling instead (see handTooltip.js's fit scale), which is
-   continuous and needs no re-measurement. */
-.hand-tooltip.is-migrated {
-  translate: -50% -50%;
-}
+/* Row CONTENT is deliberately identical in the rest and migrated poses.
+   Dropping the "Tenés un" prose when horizontal would be tighter, but it
+   changes every row's width — which both invalidates the cached layout
+   metrics and produces a visible jump at the moment it switches. The
+   horizontal row is kept inside the viewport by scaling instead (see
+   handTooltip.js's fit scale), which is continuous and needs no
+   re-measurement. (The vertical<->horizontal reflow and the rest<->migrated
+   anchor point are both driven straight from JS — see place() — so there is
+   no `.is-migrated` CSS rule; nothing here needs one.) */
 
 .hand-tooltip__footer {
   margin-top: 5px;
@@ -1017,14 +1020,15 @@ body.hand-cursor-active * {
   display: none;
 }
 
+/* Opacity only, deliberately — JS writes `transform` on this element every
+   frame (see place()), and a keyframe touching the same property would win
+   for its 180ms duration and fight that positioning. */
 @keyframes hand-tooltip-in {
   from {
     opacity: 0;
-    translate: -50% calc(-100% + 6px);
   }
   to {
     opacity: 1;
-    translate: -50% -100%;
   }
 }
 

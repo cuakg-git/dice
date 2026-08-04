@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { inflateGeometry } from "./outlineInflate.js";
 
 // Comic-style hand: flat white toon fill + thick black ink outline
 // (inverted hull). All proportions eyeballed from the reference sketch:
@@ -52,22 +53,16 @@ const OUTLINE_MATERIAL = new THREE.MeshBasicMaterial({ color: 0x0d0d0d, side: TH
 
 /**
  * A body mesh plus its ink outline: the outline is a second mesh built from
- * an *inflated copy* of the geometry (not a uniform scale — that would make
- * the stroke width depend on the part's size), rendered inside-out in black
- * so only its silhouette shows around the white body from any angle.
+ * an *inflated copy* of the geometry (see outlineInflate.js — vertices
+ * pushed out along position-welded normals, not a uniform scale, so the
+ * stroke width doesn't depend on the part's size), rendered inside-out in
+ * black so only its silhouette shows around the body from any angle.
  */
-function inkedMesh(geometry, outlineGeometry, material) {
+function inkedMesh(geometry, material, ink) {
   const mesh = new THREE.Mesh(geometry, material);
-  const outline = new THREE.Mesh(outlineGeometry, OUTLINE_MATERIAL);
+  const outline = new THREE.Mesh(inflateGeometry(geometry, ink), OUTLINE_MATERIAL);
   mesh.add(outline);
   return mesh;
-}
-
-function capsulePair(radius, length, ink) {
-  return {
-    body: new THREE.CapsuleGeometry(radius, length, 4, 12),
-    outline: new THREE.CapsuleGeometry(radius + ink, length + ink * 0.6, 4, 12),
-  };
 }
 
 /**
@@ -91,8 +86,7 @@ function buildFinger({ radius, lengths, material, ink }) {
   lengths.forEach((len, i) => {
     const joint = new THREE.Group();
     joint.name = i === 0 ? "metacarpo" : `falange${i + 1}Joint`;
-    const { body, outline } = capsulePair(radius, len, ink);
-    const phalanx = inkedMesh(body, outline, material);
+    const phalanx = inkedMesh(new THREE.CapsuleGeometry(radius, len, 4, 12), material, ink);
     phalanx.name = `falange${i + 1}`;
     phalanx.position.y = len / 2; // capsule grows outward from the joint pivot
     joint.add(phalanx);
@@ -132,16 +126,12 @@ export function createHand({ outlineWidth = 0.055, mirrored = false } = {}) {
   if (mirrored) root.scale.x = -1;
 
   // --- Palm ------------------------------------------------------------
-  const palm = inkedMesh(
-    new RoundedBoxGeometry(PALM_W, PALM_H, PALM_D, 4, 0.22),
-    new RoundedBoxGeometry(PALM_W + ink * 2, PALM_H + ink * 2, PALM_D + ink * 2, 4, 0.26),
-    material
-  );
+  const palm = inkedMesh(new RoundedBoxGeometry(PALM_W, PALM_H, PALM_D, 4, 0.22), material, ink);
   palm.name = "palma";
   root.add(palm);
 
   // Stubby wrist peeking out below, like the two little strokes in the sketch.
-  const wrist = inkedMesh(...Object.values(capsulePair(0.3, 0.35, ink)), material);
+  const wrist = inkedMesh(new THREE.CapsuleGeometry(0.3, 0.35, 4, 12), material, ink);
   wrist.name = "muñeca";
   wrist.position.set(0, -PALM_H / 2 - 0.12, 0);
   root.add(wrist);

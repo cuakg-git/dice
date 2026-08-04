@@ -29,11 +29,29 @@ import { DICE_COLORS } from "../dice/diceColors.js";
  * are side by side, that colour is the only thing telling you which die is
  * which, and tinting it would throw that away.
  */
+/**
+ * Padding + border of the tooltip box, read ONCE from its actual CSS rather
+ * than hardcoded — so this can never drift out of sync with style.css. Cheap
+ * to call once; would be a per-frame layout read (and a real cost at 60fps)
+ * if done every frame, which is why it's cached instead.
+ */
+function readBoxExtra(element) {
+  if (typeof getComputedStyle !== "function") return { x: 20, y: 14 }; // matches style.css's padding/border
+  const s = getComputedStyle(element);
+  const x = parseFloat(s.paddingLeft) + parseFloat(s.paddingRight) + parseFloat(s.borderLeftWidth) + parseFloat(s.borderRightWidth);
+  const y = parseFloat(s.paddingTop) + parseFloat(s.paddingBottom) + parseFloat(s.borderTopWidth) + parseFloat(s.borderBottomWidth);
+  return { x: Number.isFinite(x) ? x : 20, y: Number.isFinite(y) ? y : 14 };
+}
+
 export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValues }) {
   const el = document.createElement("div");
   el.className = "hand-tooltip";
   el.hidden = true;
   parent.appendChild(el);
+  // Read once at creation, not per frame — see readBoxExtra's own note. Padding
+  // is a static CSS declaration, so display:none at this point doesn't matter:
+  // its VALUE resolves regardless of whether the box is actually laid out yet.
+  const boxExtra = readBoxExtra(el);
 
   const list = document.createElement("div");
   list.className = "hand-tooltip__rows";
@@ -68,6 +86,10 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
   let rowW = 0;
   let rowH = 0;
   let metricsDirty = true;
+  // The list's own (unscaled) content size at the CURRENT migration progress —
+  // set by layout() every frame, read by the centring math in update().
+  let contentW = 0;
+  let contentH = 0;
 
   function makeRow(record) {
     const row = document.createElement("div");
@@ -202,22 +224,46 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
       state.row.style.transform = `translate(${vx + (hx - vx) * migration}px, ${vy + (hy - vy) * migration}px)`;
     });
 
-    const w = vW + (hW - vW) * migration;
-    list.style.width = `${w}px`;
-    list.style.height = `${vH + (hH - vH) * migration}px`;
+    contentW = vW + (hW - vW) * migration;
+    contentH = vH + (hH - vH) * migration;
+    list.style.width = `${contentW}px`;
+    list.style.height = `${contentH}px`;
 
     // A row of N "Tenés un X" entries is wide, and on a phone it would run off
     // both edges. Scaling the whole box to fit keeps the reflow continuous —
     // unlike shortening the rows, which would jump and invalidate the metrics.
-    return availableWidth > 0 ? Math.min(1, availableWidth / (w + 28)) : 1;
+    const fullW = contentW + boxExtra.x;
+    return availableWidth > 0 ? Math.min(1, availableWidth / fullW) : 1;
   }
 
   /**
-   * The four "charging" layers. All are driven by the SAME crescendo progress
-   * so they read as one build-up rather than four effects, and each is
-   * independently switchable from config to calibrate which ones earn a place.
+   * Places the box so a specific ANCHOR POINT on it — not its top-left corner
+   * — lands exactly at (targetX, targetY) on screen, and applies the four
+   * charging layers on top of that same placement.
+   *
+   * The position is computed directly in pixels rather than leaning on CSS's
+   * `translate: -50%` percentage trick (the previous approach): with
+   * `transform-origin` at the box's own centre (the CSS default, made
+   * explicit in style.css), `scale()` never moves that centre — only
+   * `translate()` does — so this maths is exact and independent of the
+   * current scale. The old version mixed a CSS `translate: -50%` with a JS
+   * `transform: translate() scale()`, AND flipped which CSS rule was active
+   * via a class toggled at a hard 50% migration threshold while the target
+   * point itself moved continuously — two systems computing overlapping
+   * offsets on different schedules, which is what actually produced the
+   * off-centre result.
+   *
+   * `anchorYFraction` is where the pin point sits vertically on the box: 1 =
+   * bottom edge (rest, pinned above the hand), 0.5 = centre (migrated), and
+   * everything between is interpolated continuously as migration progresses,
+   * so there is no threshold anywhere for it to jump at. Horizontal is always
+   * 0.5 — centred in both poses — so it needs no fraction at all, and is
+   * therefore exactly viewport-centred independent of row count or scale.
    */
-  function applyCharge(charge, x, y, fitScale) {
+  function place(targetX, targetY, anchorYFraction, scale, charge) {
+    const boxW = contentW + boxExtra.x;
+    const boxH = contentH + boxExtra.y;
+
     let jitterX = 0;
     let jitterY = 0;
     if (config.chargeShakeEnabled && charge > 0) {
@@ -226,20 +272,22 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
       jitterY = (Math.random() * 2 - 1) * amp;
     }
 
-    const grow = config.chargeScaleEnabled ? 1 + config.chargeScaleAmount * charge : 1;
-    // Fit scale and charge scale multiply: the box may never outgrow the
-    // viewport, however hard it's being charged.
-    const scale = grow * fitScale;
-    // transform-origin is the pin point (see CSS), so growing doesn't drag the
-    // tooltip off the spot it's anchored to.
-    el.style.transform = `translate(${x + jitterX}px, ${y + jitterY}px) scale(${scale})`;
+    // Horizontal: always centre-anchored, so the box's own centre lands at
+    // targetX regardless of scale — translate by targetX - boxW/2.
+    const px = targetX - boxW / 2;
+    // Vertical: the anchored point is `anchorYFraction` down the SCALED box
+    // (bottom edge at rest, centre once migrated), offset from the box's own
+    // centre by (anchorYFraction - 0.5) * boxH * scale.
+    const py = targetY - (anchorYFraction - 0.5) * boxH * scale - boxH / 2;
 
+    el.style.transform = `translate(${px + jitterX}px, ${py + jitterY}px) scale(${scale})`;
+
+    // The remaining charging layers: glow and background temperature. Neither
+    // touches position, so they're independent of the maths above.
     if (config.chargeGlowEnabled) {
       const g = config.chargeGlowAmount * charge;
       el.style.boxShadow =
-        g > 0.001
-          ? `0 2px 10px rgba(28, 34, 43, 0.1), 0 0 ${12 + 22 * g}px rgba(255, 150, 60, ${0.5 * g})`
-          : "";
+        g > 0.001 ? `0 2px 10px rgba(28, 34, 43, 0.1), 0 0 ${12 + 22 * g}px rgba(255, 150, 60, ${0.5 * g})` : "";
     } else {
       el.style.boxShadow = "";
     }
@@ -247,10 +295,9 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
     if (config.chargeTemperatureEnabled) {
       // Warm shift on the BACKGROUND only — never the per-type chips.
       const t = config.chargeTemperatureAmount * charge;
-      const r = Math.round(255 + (255 - 255) * t);
       const g2 = Math.round(255 + (232 - 255) * t);
       const b = Math.round(255 + (198 - 255) * t);
-      el.style.background = `rgba(${r}, ${g2}, ${b}, ${0.82 + 0.12 * t})`;
+      el.style.background = `rgba(255, ${g2}, ${b}, ${0.82 + 0.12 * t})`;
     } else {
       el.style.background = "";
     }
@@ -277,10 +324,19 @@ export function createHandTooltip({ parent, config = HAND_CONFIG.cursor.heldValu
     updateFlips(nowMs, flipIntervalMs);
     const fitScale = layout(viewportWidth);
 
-    el.classList.toggle("is-migrated", migration > 0.5);
+    // Target point interpolates from the hand to the parked spot; the anchor
+    // FRACTION (which part of the box sits on that point) interpolates over
+    // the exact same `m`, continuously — no threshold, so there is nothing
+    // for the two to disagree about mid-transition (see place()'s doc comment
+    // for what that threshold caused before).
     const x = handPoint.x + (parkedPoint.x - handPoint.x) * m;
     const y = handPoint.y + (parkedPoint.y - handPoint.y) * m;
-    applyCharge(charge, x, y, fitScale);
+    const anchorYFraction = 1 - 0.5 * m; // 1 = bottom edge (rest) -> 0.5 = centre (migrated)
+
+    const grow = config.chargeScaleEnabled ? 1 + config.chargeScaleAmount * charge : 1;
+    // Fit scale and charge growth multiply: the box may never outgrow the
+    // viewport, however hard it's being charged.
+    place(x, y, anchorYFraction, grow * fitScale, charge);
   }
 
   function hide() {
