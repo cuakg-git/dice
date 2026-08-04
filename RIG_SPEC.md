@@ -33,15 +33,65 @@ el chip del nombre.)
 | Palma | `1.6` ancho × `1.7` alto × `0.55` profundidad | `Hand.js:16-18` |
 | Dedos apuntan a | **+Y** | `Hand.js:7` |
 | Palma mira a | **+Z** | `Hand.js:7` |
-| Lado del pulgar | **+X** (meñique en −X) | `Hand.js:156` |
+| Lado del pulgar | **−X** (meñique en +X) — ver §1.1 | convención del proyecto |
 | Escala a mundo | `baseWorldScale (1.0) × scaleReduction (0.75)` = **0.75** | `handConfig.js:24-25` |
 
 El rig se modela **de pie** (dedos hacia arriba). `HandCursor` lo acuesta con
 `pivot.rotation.x = -π/2` para la cámara ortográfica cenital ([`HandCursor.js:133`](src/hand/HandCursor.js:133)).
 **El modelo NO debe venir pre-rotado**: se entrega de pie, mirando +Z.
 
-En Blender: **+Z arriba, +Y hacia adelante**, y exportar con `+Y up` (default de glTF).
-Al importar en Three, los dedos quedan en +Y y la palma en +Z.
+### Cómo se traduce esto a Blender
+
+El exportador glTF convierte Z-up de Blender a Y-up de glTF: `(x, y, z)ᵦ → (x, z, −y)`.
+Para aterrizar en la orientación de Three de arriba, **en Blender hay que modelar así**:
+
+| En Three (destino) | En Blender (modelado) |
+|---|---|
+| dedos **+Y** | dedos **+Z** (hacia arriba) |
+| palma **+Z** | palma mira **−Y** (hacia la vista Front) |
+| pulgar **−X** | pulgar **−X** |
+
+Es decir: la mano se para vertical, con la palma mirando hacia el frente de la escena.
+Exportar con `+Y up` (default de glTF) — **no** aplicar rotaciones correctivas a mano.
+En la vista **Front** de Blender el pulgar tiene que verse a la **izquierda** de pantalla.
+
+### 1.1 Lateralidad — la mano base es la DERECHA
+
+**Convención:** la geometría sin espejar es una mano **derecha** anatómica. Con la palma
+hacia la cámara (+Z) y los dedos hacia arriba (+Y), el pulgar cae en **−X**, que a cuadro
+es la **izquierda**. La mano izquierda que aparece al formar la copa es esta misma malla
+con `root.scale.x = -1` ([`Hand.js:132`](src/hand/Hand.js:132)); no se modela una segunda.
+
+> ⚠️ **El rig procedural actual NO cumple esta convención.** Coloca el pulgar en **+X**
+> ([`Hand.js:157-161,177`](src/hand/Hand.js:157)), lo que con la palma hacia cámara lo
+> deja a la derecha — geométricamente una mano **izquierda**, pese a llamarse `mano` y
+> usarse como la derecha. Con cápsulas simétricas el error es invisible; se vuelve visible
+> en cuanto hay uñas o un corte de muñeca asimétrico.
+>
+> Consecuencias al agregar el skin GLB, que sí cumple la convención:
+> - Los signos de X de §4 (posiciones de nudillo y splay) quedan **invertidos** entre el
+>   rig procedural y el GLB.
+> - `cup.right` / `cup.left` (`rotationDeg`, `offset`, `thumbSplayDeg`) fueron **resueltos
+>   numéricamente** contra la geometría actual ([`handConfig.js:438-445`](src/hand/handConfig.js:438)).
+>   Si el pulgar cambia de lado, esos valores necesitan espejarse.
+>
+> **DEUDA TÉCNICA CONOCIDA — decidido, no reabrir sin motivo.** El rig procedural **no se
+> toca**. Ya está en producción y calibrado (agarre, follow-through, batido, copa a dos
+> manos), y el riesgo de espejarlo supera al beneficio de la consistencia conceptual.
+>
+> **La convención correcta es la del GLB (pulgar −X); el rig procedural queda como la
+> excepción zurda.** El **loader del GLB absorbe la diferencia**, espejando lo que haga
+> falta al cargar, sin modificar `Hand.js` ni `handConfig.js`.
+>
+> Queda para una limpieza futura, si alguna vez conviene unificarlos.
+
+### 1.2 Eje de oposición del pulgar — no se espeja
+
+El splay del pulgar (rotación en Z) **sí** cambia de signo al espejar la lateralidad, pero
+la **oposición** (rotación en Y, la que despega el pulgar de la palma) **no**: tiene que
+apuntar hacia **+Z** en ambas manos, porque el pulgar se opone hacia la palma sea cual sea
+el lado. Espejar los dos a la vez manda el pulgar hacia atrás (−Z) y la mano deja de poder
+agarrar nada.
 
 ---
 
@@ -162,6 +212,11 @@ Splay autoral (`rotation.z` del nodo raíz de cada dedo), en radianes:
 Raíz de los cuatro dedos: `y = PALM_H/2 - 0.05 = 0.80`, `z = 0.02`.
 Raíz del pulgar: `(0.68, 0.05, 0.12)`.
 
+> **Los signos de X y de `rotation.z` de esta tabla son los del rig procedural**, que tiene
+> la lateralidad invertida (§1.1). Un GLB que cumpla la convención los lleva **negados**:
+> pulgar en `−0.68`, índice `−0.58`, medio `−0.20`, anular `+0.19`, meñique `+0.57`, y cada
+> `splay` con el signo cambiado. La `rotation.y` de oposición del pulgar **no** se niega (§1.2).
+
 Curl inicial de reposo: `[0.08, 0.06, 0.05, 0.06, 0.08]`
 ([`Hand.js:193`](src/hand/Hand.js:193)) — mano abierta y relajada, no estrella de mar.
 En la práctica `HandCursor` la pisa enseguida con la onda idle.
@@ -248,11 +303,14 @@ Eso **no es transferible a una malla importada** — ver §8.
 
 **Decisión: la cáscara se genera en RUNTIME. El GLB no la trae.**
 
-Razón: el ancho del trazo es **dinámico por plataforma**. `HandCursor` pasa
-`config.outlineWidth × outlineWidthMultiplier`, y en mobile ese multiplicador es `1.35`
-([`handConfig.js:29`](src/hand/handConfig.js:29), [`HandCursor.js:27`](src/hand/HandCursor.js:27)).
-Una cáscara horneada en Blender congelaría el ancho y rompería el ajuste de mobile.
-Además duplicaría el peso de la malla en el GLB, que va a un navegador.
+Razón: el ancho del trazo es **dinámico y se decide en runtime**. `HandCursor` construye
+la mano con `config.outlineWidth × cursor.outlineWidthMultiplier`
+([`HandCursor.js:27`](src/hand/HandCursor.js:27)) — hoy `0.055 × 1.35`. Ese multiplicador
+vive en el nivel superior de `cursor` ([`handConfig.js:29`](src/hand/handConfig.js:29)), así
+que **aplica igual en desktop y mobile**; lo que sí cambia por plataforma es
+`scaleReduction` (`0.75` desktop / `1.3` mobile, [`handConfig.js:25,420`](src/hand/handConfig.js:25)).
+Una cáscara horneada en Blender congelaría el trazo y dejaría de responder a esa
+calibración. Además duplicaría el peso de la malla en el GLB, que va a un navegador.
 
 El generador de runtime infla cada mesh **empujando los vértices sobre su normal** por
 `ink`, en vez de re-autorar primitivas.
@@ -322,7 +380,7 @@ Por eso uñas y hueso **tienen que ser nodos separados**, no fundidos en el cuer
 - [ ] Rotaciones a cero salvo el splay autoral de §4.
 
 **Orientación y escala**
-- [ ] Dedos +Y, palma +Z, pulgar +X.
+- [ ] Dedos +Y, palma +Z, pulgar **−X** (mano derecha anatómica, §1.1).
 - [ ] **No pre-rotado**: de pie, no acostado.
 - [ ] Palma ≈ `1.6 × 1.7 × 0.55` unidades.
 
