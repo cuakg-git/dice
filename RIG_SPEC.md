@@ -338,7 +338,31 @@ la otra y aparece una astilla negra. Hoy no pasa porque las cápsulas se solapan
 generosamente.
 → *Mitigación:* **las partes vecinas deben solaparse**, nunca quedar apenas a tope.
 
-**Si el modelo respeta estas tres cosas, el outline no debería romperse.** El riesgo
+**4. ⚠️ REGLA DURA: ninguna cara puede ser más chica que el `ink`.**
+Es la restricción menos obvia y la que más fácil se viola. El inflador empuja **cada
+vértice** una distancia `ink`; si una cara mide menos que eso, sus vecinas se cruzan al
+inflarse y la cáscara se pliega sobre sí misma — se ve como manchas negras o como
+geometría invertida asomando a través del cuerpo.
+
+Medido sobre las uñas de esta mano (`ink = 0.0743`):
+
+| Variante | Grosor | Verts | Caras invertidas |
+|---|---|---|---|
+| `cuts=2 bev=1` | 0.0594 | 216 | **104** |
+| `cuts=2 bev=1` | 0.1215 | 216 | **110** |
+| `cuts=2 bev=1` | 0.1755 | 216 | **202** |
+| `cuts=1 bev=0` | 0.0594 | **26** | **0** |
+| `cuts=1 bev=0` | 0.1755 | **26** | **0** |
+
+**El grosor de la pieza no influye: lo que decide es el tamaño de cara.** Engrosar
+empeora el problema si de paso se subdivide más. Subdividir "para que quede más suave" es
+exactamente lo que rompe el outline.
+
+Aplica a **cualquier** geometría futura de este sistema, no solo a esta mano. Ante la duda,
+menos polígonos: además de ser la regla del proyecto para el navegador, es lo que mantiene
+el outline sano.
+
+**Si el modelo respeta estas cuatro cosas, el outline no debería romperse.** El riesgo
 residual es el punto 1 en zonas muy anguladas, y se ve al primer screenshot.
 
 ---
@@ -389,6 +413,8 @@ Por eso uñas y hueso **tienen que ser nodos separados**, no fundidos en el cuer
 - [ ] Cada parte cerrada (manifold), sin vértices dobles.
 - [ ] Partes vecinas **solapadas**, no a tope.
 - [ ] Poly count bajo — esto corre en un navegador.
+- [ ] **Ninguna cara más chica que el `ink` del outline** (§8 riesgo 4). No subdividir
+      "para suavizar": es lo que pliega la cáscara.
 - [ ] Se ve bien **espejada** (`scale.x = -1`).
 
 **Materiales**
@@ -399,6 +425,21 @@ Por eso uñas y hueso **tienen que ser nodos separados**, no fundidos en el cuer
 - [ ] `+Y up`.
 - [ ] Sin armature ni skinning.
 - [ ] Nombres de nodo sobreviven (verificar que Blender no agregó `.001`).
+
+### Verificación automática
+
+Todo este checklist está implementado en
+[`tools/verify-hand-glb.mjs`](tools/verify-hand-glb.mjs). **Correrlo después de cada
+reexport**, no revisar a ojo:
+
+```bash
+node tools/verify-hand-glb.mjs
+```
+
+Sale con código 1 si algo falla. Cubre nombres de nodo, materiales sin texturas, el
+inflador de outline sobre la geometría **ya exportada** (§8 riesgo 4), y escala y
+orientación (§1). Fue lo que detectó las 104 caras invertidas en las uñas antes de que
+llegaran a la app.
 
 ---
 
