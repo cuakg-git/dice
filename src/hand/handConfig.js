@@ -20,6 +20,11 @@ export const HAND_CONFIG = {
   },
 
   cursor: {
+    // Which hand geometry to use: "default" is the procedural rig (Hand.js,
+    // unchanged behavior). Any other value must be preloaded first — see
+    // handSkins.js's preloadHandSkin(). "orco" is registered but not yet
+    // wired into main.js's boot sequence; switching this alone isn't enough.
+    skin: "default",
     // Final world scale = baseWorldScale * scaleReduction (the spec's -25%).
     baseWorldScale: 1.0,
     scaleReduction: 0.75,

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { createHand } from "./Hand.js";
+import { createHandSkin } from "./handSkins.js";
 import { HAND_CONFIG, restRotationDegrees } from "./handConfig.js";
 import { easeOutCubic, easeInOutCubic } from "../animation.js";
 
@@ -24,7 +24,10 @@ export function createHandCursor({ scene, config = HAND_CONFIG, platform = "desk
   const anchorCfg = c.anchored;
   const scale = c.baseWorldScale * c.scaleReduction;
 
-  const hand = createHand({ outlineWidth: config.outlineWidth * c.outlineWidthMultiplier });
+  // skin: "default" (procedural, Hand.js) unless config.cursor.skin names a
+  // preloaded GLB skin — see handSkins.js. Passthrough when "default", so
+  // this is behaviorally identical to the old direct createHand() call.
+  const hand = createHandSkin({ skin: c.skin, outlineWidth: config.outlineWidth * c.outlineWidthMultiplier });
   const rest = restRotationDegrees();
   hand.root.rotation.set(THREE.MathUtils.degToRad(rest.x), THREE.MathUtils.degToRad(rest.y), 0);
 
@@ -74,7 +77,8 @@ export function createHandCursor({ scene, config = HAND_CONFIG, platform = "desk
   // the right hand's pointer-follow and lean for free; only its couple-in /
   // couple-out offset+scale animates, on a wrapper of its own.
   const cupCfg = config.cup;
-  const leftHand = createHand({
+  const leftHand = createHandSkin({
+    skin: c.skin,
     outlineWidth: config.outlineWidth * c.outlineWidthMultiplier,
     mirrored: true,
   });

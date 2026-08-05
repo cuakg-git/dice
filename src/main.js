@@ -24,6 +24,7 @@ import { buildRollWebhookPayload } from "./state/discordMessage.js";
 import { getBreakpoint, isTouchDevice } from "./responsive.js";
 import { createDicePhysics } from "./physics/DicePhysics.js";
 import { createHandCursor, gripCurlForDie, inradiusFraction } from "./hand/HandCursor.js";
+import { preloadHandSkin } from "./hand/handSkins.js";
 import { HAND_CONFIG } from "./hand/handConfig.js";
 import { createLaunchEffects } from "./effects/launchEffects.js";
 import { initNameGate, isModalOpen, subscribeModalOpen } from "./ui/nameGate.js";
@@ -217,9 +218,36 @@ const { scene, camera, renderer, start, onResize, onFrame, setViewTarget } = cre
   antialias: !touchDevice,
 });
 
+// Single switch for which hand skin boots — "default" is the procedural rig
+// (Hand.js, calibrated, always available); any other id must be one
+// registered in handSkins.js (currently just "orco", the modeled GLB from
+// RIG_SPEC.md). Flip this ONE line back to "default" and reload to revert —
+// HAND_CONFIG.cursor.skin itself stays "default" on purpose, so reverting
+// never requires touching handConfig.js.
+const ACTIVE_HAND_SKIN = "orco";
+
 // Rapier loads its WASM asynchronously; everything below is synchronous
-// setup, so await it up front before wiring the frame loop.
-const physics = await createDicePhysics();
+// setup, so await it up front before wiring the frame loop. The hand skin's
+// GLB is unrelated to physics, so it loads CONCURRENTLY rather than after —
+// same top-level-await shape, just two things in flight at once.
+//
+// preloadHandSkin() is internally bounded (handSkins.js) so a stalled fetch
+// can't hang this forever; still wrapped here in try/catch because a
+// non-timeout failure (bad file, parse error, 404) rejects immediately and
+// must not crash boot either. Either way, on failure this falls back to
+// "default" and says so loudly in the console — never a silent stuck screen.
+const physicsPromise = createDicePhysics();
+const handSkinPromise =
+  ACTIVE_HAND_SKIN === "default"
+    ? Promise.resolve("default")
+    : preloadHandSkin(ACTIVE_HAND_SKIN)
+        .then(() => ACTIVE_HAND_SKIN)
+        .catch((err) => {
+          console.error(`[hand] no se pudo cargar el skin "${ACTIVE_HAND_SKIN}", uso "default":`, err);
+          return "default";
+        });
+
+const physics = await physicsPromise;
 
 // iOS Safari's 100vh includes space the address bar can cover; 100dvh (in
 // style.css) handles this in modern engines, and this keeps a JS-computed
@@ -269,7 +297,10 @@ scene.add(dragShadow);
 // handConfig's `anchored` block). It is never handed to the raycaster, so it
 // can't click itself or mask a die under it, and it floats above the board's
 // ceiling so nothing can occlude it.
-const handCursor = createHandCursor({ scene, platform: touchDevice ? "mobile" : "desktop" });
+const handSkin = await handSkinPromise; // resolved (with fallback already applied) above
+const handConfig =
+  handSkin === HAND_CONFIG.cursor.skin ? HAND_CONFIG : { ...HAND_CONFIG, cursor: { ...HAND_CONFIG.cursor, skin: handSkin } };
+const handCursor = createHandCursor({ scene, config: handConfig, platform: touchDevice ? "mobile" : "desktop" });
 
 // Comic-style throw feedback (streaks + speed lines). Pre-allocates its whole
 // mesh pool here so a throw never allocates; see launchEffects.js.
